@@ -1,0 +1,322 @@
+# 企业维修知识管理系统 — 操作指南
+
+> 覆盖：Docker 常用指令、前后端启动、Git 初始化与常用指令
+> 环境：Windows 10/11 + PowerShell
+
+---
+
+## 一、项目结构速览
+
+```
+d:\WeiZhi Works
+├── docker-compose.yml      # 基础设施编排（PostgreSQL / Redis / Milvus / etcd / MinIO）
+├── backend/                # FastAPI 后端（Python 3.x）
+│   ├── app/                # 业务代码（api / agents / core / models）
+│   ├── alembic/            # 数据库迁移
+│   ├── scripts/            # 种子数据脚本（seed_*.py）
+│   ├── requirements.txt    # Python 依赖
+│   ├── .env                # 环境配置（勿提交到 Git）
+│   ├── .env.example        # 配置模板（可提交）
+│   └── start_backend.ps1   # 一键启动后端
+├── frontend/               # Vue3 + Vite 前端
+│   └── package.json        # 前端依赖（npm）
+└── RETRIEVAL_PIPELINE.md   # 检索机制详解文档
+```
+
+| 服务 | 容器/进程 | 本机端口 | 说明 |
+|---|---|---|---|
+| PostgreSQL | maintenance_postgres | 5432 | 关系数据（用户/工单/知识元数据） |
+| Redis | maintenance_redis | **7379** | 缓存 + 会话（注意不是 6379） |
+| Milvus | maintenance_milvus | 19530 / 9091 | 向量库（语义检索） |
+| etcd | maintenance_etcd | 2379 | Milvus 元数据 |
+| MinIO | maintenance_minio | 9000 / 9001 | 对象存储（Milvus 依赖） |
+| 后端 API | uvicorn（本机进程） | 8000 | FastAPI，**必须 127.0.0.1** |
+| 前端 | vite（本机进程） | 5173 | 开发服务器，代理 /api → 8000 |
+
+---
+
+## 二、Docker 常用指令
+
+### 2.1 查看与状态
+
+```powershell
+docker --version                 # 查看 Docker 版本
+docker-compose --version         # 查看编排工具版本
+docker-compose ps                # 查看当前项目所有容器状态（关键排查命令）
+docker ps                        # 查看运行中的容器
+docker ps -a                     # 查看所有容器（含已停止）
+docker images                    # 查看本地镜像
+```
+
+> 排查提示：Milvus 连接不上时，**先执行 `docker-compose ps`** 确认 5 个容器是否都 Up 且 healthy，这是最常见的坑。
+
+### 2.2 启动 / 停止
+
+```powershell
+# 启动全部基础设施（postgres/redis/etcd/minio/milvus），-d 表示后台运行
+docker-compose up -d
+
+# 只启动某个服务（依赖会自动先启动）
+docker-compose up -d postgres redis
+docker-compose up -d milvus
+
+# 重新构建并启动（改了 docker-compose.yml 后执行）
+docker-compose up -d --build
+
+# 停止全部容器（容器仍在，数据卷保留，重启数据不丢）
+docker-compose down
+
+# 停止并删除所有容器 + 网络（数据卷仍保留）
+docker-compose down -v          # ⚠️ 慎用！-v 会连数据卷一起删，数据库数据全丢
+```
+
+### 2.3 查看日志
+
+```powershell
+docker-compose logs -f              # 跟踪所有服务日志
+docker-compose logs -f milvus       # 只看某个服务
+docker-compose logs --tail=100 postgres   # 只看最后 100 行
+```
+
+### 2.4 进入容器操作
+
+```powershell
+# 进入 PostgreSQL 容器（交互式）
+docker exec -it maintenance_postgres bash
+# 然后可在容器内执行 psql：
+#   psql -U admin -d maintenance_db
+
+# 或一行直接执行 SQL（不进入容器）
+docker exec -it maintenance_postgres psql -U admin -d maintenance_db -c "SELECT count(*) FROM knowledge_items;"
+
+# 进入 Redis 容器执行命令
+docker exec -it maintenance_redis redis-cli ping        # 返回 PONG 说明正常
+docker exec -it maintenance_redis redis-cli KEYS "*"    # 查看所有 key
+
+# 进入 Milvus 容器
+docker exec -it maintenance_milvus bash
+```
+
+### 2.5 清理
+
+```powershell
+docker system df                 # 查看磁盘占用
+docker system prune              # 清理无用镜像/容器/网络（不影响数据卷）
+docker rm 容器名                  # 删除指定容器
+docker rmi 镜像ID                # 删除指定镜像
+```
+
+---
+
+## 三、项目启动（完整流程）
+
+### 3.1 首次初始化（只做一次）
+
+```powershell
+# ① 启动基础设施
+cd "d:\WeiZhi Works"
+docker-compose up -d
+docker-compose ps                # 确认 5 个容器都 Up
+
+# ② 准备后端虚拟环境（已在项目里建过 .venv 的跳过）
+cd backend
+python -m venv .venv
+.venv\Scripts\Activate.ps1       # 激活虚拟环境（PowerShell）
+pip install -r requirements.txt  # 安装依赖
+
+# ③ 环境配置：把 backend\.env.example 复制一份为 backend\.env
+#    并填入你的 DeepSeek / 钉钉等真实密钥（当前项目已有 .env，此步可跳过）
+
+# ④ 初始化数据库表结构（alembic 迁移）
+cd "d:\WeiZhi Works\backend"
+alembic upgrade head
+
+# ⑤ 导入种子数据（顺序执行）
+python scripts\seed_knowledge.py      # 必跑：导入 200 条维修知识案例
+python scripts\seed_categories.py     # 故障分类
+python scripts\seed_fault_codes.py    # 故障编码
+python scripts\seed_data.py           # 基础数据（用户/设备/备件等）
+
+# ⑥ 把知识条目向量同步到 Milvus（语义检索依赖）
+python sync_vectors.py
+# 预期输出：✅ 向量同步完成！ 成功: N
+
+# ⑦ 启动后端
+# 方式 A（推荐，脚本里已带正确参数）：
+powershell -ExecutionPolicy Bypass -File start_backend.ps1
+# 方式 B（等价手写命令）：
+uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+
+# ⑧ 另开一个终端启动前端
+cd "d:\WeiZhi Works\frontend"
+npm install          # 首次安装依赖（node_modules）
+npm run dev          # 启动开发服务器
+```
+
+> ⚠️ Windows 硬性要求：后端必须 `--host 127.0.0.1`，**不要用 0.0.0.0**（Windows 下会绑定失败）。
+
+### 3.2 日常启动（正常使用）
+
+```powershell
+# 终端 1：启动基础设施
+cd "d:\WeiZhi Works"
+docker-compose up -d
+
+# 终端 2：启动后端
+cd "d:\WeiZhi Works\backend"
+.venv\Scripts\Activate.ps1
+uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+
+# 终端 3：启动前端
+cd "d:\WeiZhi Works\frontend"
+npm run dev
+```
+
+浏览器访问：
+- 前端页面：http://127.0.0.1:5173
+- 后端接口文档（Swagger）：http://127.0.0.1:8000/docs
+- 健康检查：http://127.0.0.1:8000/api/v1/health
+
+### 3.3 常用维护操作
+
+```powershell
+# 新增/修改了数据库模型后，生成并执行迁移
+cd "d:\WeiZhi Works\backend"
+alembic revision --autogenerate -m "描述本次改动"
+alembic upgrade head
+
+# 知识库里新增了知识条目，需要重新同步向量（增量）
+python sync_vectors.py
+
+# 查看后端实时日志（uvicorn 终端里 Ctrl+C 停止）
+# 日志文件：backend/logs/app.log
+```
+
+---
+
+## 四、Git 常用指令
+
+### 4.1 概念速记
+
+```
+工作区（你的代码） → git add → 暂存区 → git commit → 本地仓库 → git push → 远程仓库(GitHub)
+                                                    ← git pull ←
+```
+
+### 4.2 首次创建仓库并上传（本项目已做，步骤保留参考）
+
+```powershell
+cd "d:\WeiZhi Works"
+
+# ① 初始化仓库
+git init
+
+# ② 添加所有文件到暂存区
+git add -A                      # 或按需 git add 具体文件/目录
+
+# ③ 查看暂存内容，确认没有 .env 等敏感文件（.gitignore 已自动排除）
+git status
+
+# ④ 提交
+git commit -m "init: 企业维修知识管理系统初始提交"
+
+# ⑤ 关联远程仓库（GitHub 上先建好同名仓库）
+git remote add origin https://github.com/你的用户名/Smart-Repair-System.git
+
+# ⑥ 推送（-u 记住远程，以后直接 git push）
+git push -u origin master
+```
+
+> 🌐 **国内网络 GitHub 推送失败（443 超时）的解决办法**：
+> 若本地开了 Clash 等代理（端口常见 7897），先设置代理再推送：
+> ```powershell
+> $env:HTTPS_PROXY="http://127.0.0.1:7897"
+> $env:HTTP_PROXY="http://127.0.0.1:7897"
+> git push -u origin master
+> ```
+
+### 4.3 日常使用
+
+```powershell
+git status                      # 查看工作区状态（谁改了什么）
+git diff                        # 查看未暂存的改动内容
+git diff --staged               # 查看已暂存的改动
+
+git add 文件名                   # 暂存单个文件
+git add .                       # 暂存当前目录所有改动
+git add -A                      # 暂存所有改动（含删除）
+
+git commit -m "说明文字"         # 提交
+git commit --amend -m "新说明"   # 修改上一次提交的信息
+
+git log --oneline -5            # 查看最近 5 次提交
+git log --oneline --graph       # 图形化查看分支历史
+
+git push                        # 推送到远程（首次需 -u origin 分支名）
+git pull                        # 拉取远程最新代码（= fetch + merge）
+git fetch                       # 只下载远程更新，不合并
+
+git branch                      # 查看本地分支
+git branch -a                   # 查看所有分支（含远程）
+git branch 新分支名              # 创建分支
+git checkout 分支名              # 切换分支
+git checkout -b 新分支名         # 创建并切换
+git merge 分支名                # 把指定分支合并到当前分支
+git branch -d 分支名             # 删除已合并的分支
+```
+
+### 4.4 撤销与回滚
+
+```powershell
+git restore 文件名               # 丢弃工作区改动，还原到最近一次提交
+git restore --staged 文件名      # 把已暂存的文件移出暂存区（不丢改动）
+git reset HEAD~1                # 撤销最近一次提交（保留改动）
+git reset --hard HEAD~1         # 撤销最近一次提交并丢弃改动（⚠️ 不可找回）
+git checkout -- 文件名           # 老版本写法，同 git restore
+```
+
+### 4.5 分支协作建议流程（多人开发）
+
+```powershell
+# 自己干活前先拉最新
+git pull
+
+# 从主干拉出自己的功能分支
+git checkout -b feature/xxx
+
+# ... 开发、提交若干次 ...
+
+# 切回主干并合并
+git checkout master
+git merge feature/xxx
+
+# 推送到远程
+git push
+
+# 删掉用过的分支
+git branch -d feature/xxx
+```
+
+### 4.6 安全红线（务必遵守）
+
+| 事项 | 说明 |
+|---|---|
+| **.env 不能提交** | 含 DeepSeek / 钉钉 / 阿里云密钥，已加进 .gitignore |
+| 不要 `git push --force` | 会覆盖远程历史，除非你明确知道后果 |
+| 不要提交 `.venv/`、`node_modules/` | 体积大且可重建，已被 .gitignore 排除 |
+| commit 前先 `git status` | 检查是否有敏感文件混入 |
+
+---
+
+## 五、常见问题排查速查表
+
+| 现象 | 排查步骤 |
+|---|---|
+| 后端启动报数据库连接失败 | `docker-compose ps` 看 postgres 是否 healthy；`docker-compose logs postgres` |
+| Milvus 连接失败 | 同上，先看 `docker-compose ps`；再 `docker exec -it maintenance_milvus bash` 确认进程 |
+| Redis 连不上 | 检查 .env 里 REDIS_PORT=**7379**（compose 映射 7379→容器内 6379） |
+| 前端接口 404 / 502 | 确认后端 8000 已启动；确认 vite 代理指向 127.0.0.1:8000 |
+| GitHub push 超时 | 设置 Clash 代理后重试（见 4.2） |
+| 改了代码不生效 | 后端确认带 `--reload`；前端 vite 热更新需页面刷新 |
+| 数据库表结构对不上 | `alembic upgrade head` 执行最新迁移 |
+| 检索不到新知识 | 新增知识后执行 `python sync_vectors.py` 同步向量 |
