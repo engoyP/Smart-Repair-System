@@ -1,0 +1,52 @@
+# FastAPI 核心
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+pydantic==2.5.3
+pydantic-settings==2.1.0
+
+# 数据库
+sqlalchemy==2.0.25
+alembic==1.13.1
+psycopg2-binary==2.9.9
+asyncpg==0.29.0
+
+# Redis (redis 5.0+ 已内置 async 支持)
+redis==5.0.1
+
+# LangChain + LangGraph
+langchain==0.1.20
+langchain-openai==0.1.6
+langchain-community==0.0.38
+langgraph==0.0.28
+langsmith==0.1.50
+
+# 向量数据库 (Milvus)
+pymilvus==2.4.15
+langchain-milvus==0.1.4
+
+# 数据处理
+pandas==2.2.0
+numpy==1.26.3
+python-multipart==0.0.6
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+
+# Embedding 模型
+torch>=2.0.0
+transformers>=4.40.0
+
+# HTTP 客户端
+httpx==0.26.0
+aiohttp==3.9.3
+
+# 工具
+python-dotenv>=1.0.1
+loguru==0.7.2
+
+# 阿里云短信服务
+alibabacloud_dysmsapi20170525>=3.1.0
+
+# 测试
+pytest==8.0.0
+pytest-asyncio==0.23.4
+pytest-cov==4.1.0

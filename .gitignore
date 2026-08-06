@@ -1,0 +1,59 @@
+# ===== 环境变量与密钥（绝不提交）=====
+.env
+.env.local
+.env.*
+!.env.example
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist-packages/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# ===== 虚拟环境 =====
+.venv/
+venv/
+ENV/
+env/
+
+# ===== 前端 =====
+node_modules/
+frontend/dist/
+frontend/.vite/
+*.local
+
+# ===== 日志 =====
+logs/
+*.log
+
+# ===== 运行数据 =====
+backend/uploads/
+uploads/
+*.db
+*.sqlite3
+*.sqlite
+
+# ===== IDE / 系统 =====
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ===== 临时调试脚本 =====
+_tmp_*.py
+_bench_*.py
+_peek_*.py
+_verify_*.py
+_test_*.py
+_check_*.py

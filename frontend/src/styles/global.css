@@ -1,0 +1,270 @@
+/* ========================================
+   企业维修知识管理系统 — 全局样式 & Element Plus 主题覆盖
+   设计规范: 简洁、务实、企业级工具风格
+   参考: 飞书/钉钉工作台
+   ======================================== */
+
+/* --- CSS 变量 --- */
+:root {
+  --color-bg-page: #F7F8FA;
+  --color-bg-card: #FFFFFF;
+  --color-bg-filter: #FFFFFF;
+  --color-sidebar-bg: #FFFFFF;
+  --color-sidebar-text: #4E5969;
+  --color-sidebar-active-bg: rgba(15,198,194,0.1);
+  --color-sidebar-active-text: #0FC6C2;
+  --color-sidebar-group: #C9CDD4;
+  --color-sidebar-border: #F0F1F3;
+  --color-text-primary: #1D2129;
+  --color-text-secondary: #4E5969;
+  --color-text-tertiary: #86909C;
+  --color-text-disabled: #C9CDD4;
+  --color-border: #E8E9ED;
+  --color-border-light: #F0F1F3;
+  --color-divider: #E5E6EB;
+  --color-primary: #0FC6C2;
+  --color-primary-hover: #0BB4B0;
+  --color-primary-light: rgba(15,198,194,0.08);
+  --color-primary-mid: rgba(15,198,194,0.15);
+  --color-success: #00B42A;
+  --color-warning: #FF7D00;
+  --color-danger: #F53F3F;
+  --color-info: #3491FA;
+
+  --font-family: "PingFang SC","Microsoft YaHei","Helvetica Neue",Arial,sans-serif;
+  --font-size-title: 20px;
+  --font-size-subtitle: 16px;
+  --font-size-body: 14px;
+  --font-size-caption: 12px;
+  --line-height: 1.5;
+
+  --spacing-page: 24px;
+  --spacing-card-gap: 16px;
+
+  --shadow-card: 0 1px 2px rgba(0,0,0,0.03);
+  --shadow-card-hover: 0 2px 8px rgba(0,0,0,0.06);
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.03);
+  --shadow-md: 0 2px 8px rgba(0,0,0,0.06);
+
+  --radius-sm: 4px;
+  --radius-btn: 6px;
+  --radius-card: 8px;
+  --radius-dialog: 12px;
+  --radius-tag: 4px;
+}
+
+/* --- 全局重置 --- */
+*,*::before,*::after { margin:0;padding:0;box-sizing:border-box; }
+html,body,#app {
+  height:100%;
+  font-family:var(--font-family);
+  font-size:var(--font-size-body);
+  color:var(--color-text-primary);
+  background:var(--color-bg-page);
+  -webkit-font-smoothing:antialiased;
+}
+
+/* ========================================
+   Element Plus 主题覆盖
+   ======================================== */
+:root {
+  --el-color-primary: #0FC6C2;
+  --el-color-primary-light-3: #46D4D1;
+  --el-color-primary-light-5: #6EDEDC;
+  --el-color-primary-light-7: #96E9E7;
+  --el-color-primary-light-8: #B3F0EF;
+  --el-color-primary-light-9: #D1F7F6;
+  --el-color-success: #00B42A;
+  --el-color-warning: #FF7D00;
+  --el-color-danger: #F53F3F;
+  --el-color-info: #3491FA;
+  --el-border-radius-base: 6px;
+  --el-border-radius-small: 4px;
+  --el-border-radius-round: 20px;
+  --el-font-family: var(--font-family);
+  --el-font-size-base: 14px;
+  /* 默认按钮样式覆盖 — Element Plus 默认按钮文字用主色(#0FC6C2)，白底看不清 */
+  --el-button-text-color: #1D2129;
+  --el-button-border-color: #DCDFE6;
+  --el-button-bg-color: #FFFFFF;
+  --el-button-hover-text-color: #0FC6C2;
+  --el-button-hover-border-color: #0FC6C2;
+  --el-button-hover-bg-color: #D1F7F6;
+}
+
+/* 按钮 */
+.el-button { font-weight: 500; }
+.el-button--small { font-size: 13px; padding: 6px 14px; }
+/* 默认按钮（无 type 属性）强制黑色文字 */
+.el-button:not([class*='el-button--primary']):not([class*='el-button--success']):not([class*='el-button--warning']):not([class*='el-button--danger']):not([class*='el-button--info']) {
+  color: #1D2129 !important;
+  -webkit-text-fill-color: #1D2129 !important;
+}
+
+/* 卡片 — 白底细边框微阴影 */
+.el-card {
+  --el-card-border-radius: 8px;
+  --el-card-border-color: var(--color-border);
+  border: 1px solid var(--color-border);
+  box-shadow: var(--shadow-card);
+  transition: box-shadow .2s;
+}
+.el-card:hover { box-shadow: var(--shadow-card-hover); }
+.el-card.is-always-shadow,
+.el-card.is-hover-shadow:hover { box-shadow: var(--shadow-card-hover); }
+
+/* 筛选卡片 */
+.filter-card.el-card {
+  background: var(--color-bg-filter);
+  border: 1px solid var(--color-border);
+}
+
+/* 表格 */
+.el-table {
+  --el-table-border-color: var(--color-border);
+  --el-table-header-bg-color: #F7F8FA;
+  --el-table-row-hover-bg-color: rgba(15,198,194,0.06);
+  font-size: 14px;
+  border-radius: 6px;
+  overflow: hidden;
+}
+.el-table th.el-table__cell {
+  color: var(--color-text-primary);
+  font-weight: 600;
+  height: 48px;
+  font-size: 13px;
+}
+.el-table td.el-table__cell { height: 48px; }
+.el-table--striped .el-table__body tr.el-table__row--striped td.el-table__cell {
+  background-color: #FAFBFC;
+}
+
+/* 标签 */
+.el-tag { --el-tag-border-radius: 4px; font-weight: 500; }
+
+/* 输入框 + 选择器 */
+.el-input__wrapper { border-radius: 6px; transition: border-color .2s, box-shadow .2s; }
+.el-input__wrapper:hover { border-color: var(--color-primary); }
+
+/* 分页 */
+.el-pagination { --el-pagination-font-size: 14px; margin-top: 16px; justify-content: flex-end; }
+
+/* 对话框 */
+.el-dialog { --el-dialog-border-radius: 12px; }
+
+/* MessageBox 确认框 — 取消按钮可读性 */
+.el-message-box__btns .el-button:not(.el-button--primary) {
+  color: var(--color-text-secondary) !important;
+  border-color: var(--color-border) !important;
+  background: #fff !important;
+}
+.el-message-box__btns .el-button:not(.el-button--primary):hover {
+  border-color: var(--color-primary) !important;
+  color: var(--color-primary) !important;
+  background: var(--el-color-primary-light-9, #D1F7F6) !important;
+}
+
+/* 表单 */
+.el-form-item__label { color: var(--color-text-primary); font-weight: 500; }
+
+/* 菜单 */
+.el-menu { border-right: none; }
+
+/* ========================================
+   通用页面组件样式
+   ======================================== */
+
+/* 页面头部 */
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+.page-title {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  position: relative;
+  padding-left: 14px;
+}
+.page-title::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 2px;
+  bottom: 2px;
+  width: 4px;
+  background: var(--color-primary);
+  border-radius: 2px;
+}
+
+/* 筛选栏 */
+.filter-bar {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.filter-input { width: 220px !important; }
+.filter-select { width: 130px !important; }
+
+/* 操作按钮组 */
+.action-group {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 6px;
+  white-space: nowrap;
+}
+.action-group .el-button {
+  margin-left: 0 !important;
+  flex-shrink: 0;
+  font-weight: 500;
+}
+.action-btn { flex-shrink: 0; }
+
+/* 次要按钮（重置/展开收起） */
+.secondary-btn {
+  border: 1px solid var(--el-border-color,#dcdfe6) !important;
+  background: #fff !important;
+  color: var(--color-text-secondary,#4E5969) !important;
+}
+.secondary-btn:hover {
+  border-color: var(--color-primary,#0FC6C2) !important;
+  color: var(--color-primary,#0FC6C2) !important;
+  background: var(--el-color-primary-light-9,#F6FEFE) !important;
+}
+
+/* 分页容器 */
+.pagination-wrap {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--color-border-light);
+}
+
+/* ========================================
+   工单/知识状态标签
+   ======================================== */
+.status-tag {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 20px;
+}
+.status-SUBMITTED { background:#FFF3E8; color:#FF7D00; }
+.status-STANDARDIZED { background:#E8F3FF; color:#3491FA; }
+.status-CLASSIFIED { background:#E8F9F9; color:#0FC6C2; }
+.status-APPROVED { background:#E8F8EE; color:#00B42A; }
+.status-REJECTED { background:#FFECEC; color:#F53F3F; }
+.status-ASSIGNED { background:#F3E8FF; color:#722ED1; }
+.status-IN_PROGRESS { background:#FFF7E8; color:#FA8C16; }
+.status-COMPLETED { background:#E8F5E9; color:#2E7D32; }
+.status-ARCHIVED { background:#F2F3F5; color:#C9CDD4; }
+.status-DRAFT { background:#F2F3F5; color:#4E5969; }
+.status-UNDER_REVIEW { background:#FFF3E8; color:#FF7D00; }
+.status-PUBLISHED { background:#E8F8EE; color:#00B42A; }
+.status-DEPRECATED { background:#FFECEC; color:#F53F3F; }
