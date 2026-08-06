@@ -66,7 +66,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
-    description="企业维修知识管理系统 - 以工单收录与知识沉淀为核心",
+    description="Smart-Repair-System - 以工单收录与知识沉淀为核心",
     lifespan=lifespan
 )
 

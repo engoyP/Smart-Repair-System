@@ -1,5 +1,5 @@
 # ============================================================
-# 企业维修知识管理系统 - Python 依赖清单（requirements.txt）
+# Smart-Repair-System - Python 依赖清单（requirements.txt）
 #
 # 安装命令（虚拟环境中执行）：
 #   pip install -r requirements.txt

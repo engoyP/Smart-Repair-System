@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     # 强制用绝对路径加载 .env，避免相对路径依赖 CWD 导致 uvicorn worker 读取不到配置
     model_config = SettingsConfigDict(env_file=_ENV_FILE, case_sensitive=True, extra="ignore")
     # 应用配置
-    APP_NAME: str = "企业维修知识管理系统"
+    APP_NAME: str = "Smart-Repair-System"
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = True
     BACKEND_PORT: int = 8000

@@ -157,7 +157,7 @@ def mock_dingtalk_auth_page(state: str = ""):
   <div class="header">
     <div class="logo">D</div>
     <div>
-      <div class="title">维修知识管理系统</div>
+      <div class="title">Smart-Repair-System</div>
       <div class="subtitle">申请获取您的钉钉身份信息（Mock）</div>
     </div>
   </div>

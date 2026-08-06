@@ -42,7 +42,7 @@ def agent_node(state: ChatState) -> ChatState:
         state["response"] = "错误：DeepSeek API Key 未配置，请检查环境变量 DEEPSEEK_API_KEY"
         return state
 
-    messages = [SystemMessage(content="你是一个企业维修知识管理系统的 AI 助手，专注于帮助用户解决设备维修问题。请用简洁专业的中文回答。")]
+    messages = [SystemMessage(content="你是一个 Smart-Repair-System 的 AI 助手，专注于帮助用户解决设备维修问题。请用简洁专业的中文回答。")]
 
     for msg in state["messages"][-5:]:
         if msg.get("role") == "user":
@@ -97,7 +97,7 @@ async def hello_world():
 
     try:
         llm = create_agent()
-        response = llm.invoke([HumanMessage(content="你好！请简单介绍一下你自己，并说明你能为企业维修知识管理系统提供什么帮助。")])
+        response = llm.invoke([HumanMessage(content="你好！请简单介绍一下你自己，并说明你能为 Smart-Repair-System 提供什么帮助。")])
 
         return {
             "status": "success",

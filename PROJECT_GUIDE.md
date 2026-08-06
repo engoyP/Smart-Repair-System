@@ -1,6 +1,12 @@
-# 企业维修知识管理系统 — 操作指南
+# Smart-Repair-System — 操作指南
 
-> 覆盖：Docker 常用指令、前后端启动、Git 初始化与常用指令
+> **项目简介**：面向制造企业的设备维修数字化平台，覆盖工单全流程、设备台账、备件库存、排班与维修知识库。核心亮点：
+> ① **RAG 混合检索**——Milvus 语义向量 + PostgreSQL BM25 关键词双路召回，RRF 融合后按故障原因加权重排，用大白话描述故障即可命中历史案例；
+> ② **多 Agent 协作**——意图路由、ReAct 检索循环、回答/追踪维修/派工 Agent，支持自然语言排查引导；
+> ③ **钉钉深度集成**——扫码绑定、机器人对话、OA 审批、工单卡片推送；
+> ④ **技术栈** Vue3 + FastAPI + LangGraph，Milvus 向量库支撑语义检索。
+
+> 本文档覆盖：Docker 常用指令、前后端启动、Git 初始化与常用指令
 > 环境：Windows 10/11 + PowerShell
 
 ---
@@ -8,7 +14,7 @@
 ## 一、项目结构速览
 
 ```
-d:\WeiZhi Works
+d:\Smart-Repair-System
 ├── docker-compose.yml      # 基础设施编排（PostgreSQL / Redis / Milvus / etcd / MinIO）
 ├── backend/                # FastAPI 后端（Python 3.x）
 │   ├── app/                # 业务代码（api / agents / core / models）
@@ -114,7 +120,7 @@ docker rmi 镜像ID                # 删除指定镜像
 
 ```powershell
 # ① 启动基础设施
-cd "d:\WeiZhi Works"
+cd "d:\Smart-Repair-System"
 docker-compose up -d
 docker-compose ps                # 确认 5 个容器都 Up
 
@@ -128,7 +134,7 @@ pip install -r requirements.txt  # 安装依赖
 #    并填入你的 DeepSeek / 钉钉等真实密钥（当前项目已有 .env，此步可跳过）
 
 # ④ 初始化数据库表结构（alembic 迁移）
-cd "d:\WeiZhi Works\backend"
+cd "d:\Smart-Repair-System\backend"
 alembic upgrade head
 
 # ⑤ 导入种子数据（顺序执行）
@@ -148,7 +154,7 @@ powershell -ExecutionPolicy Bypass -File start_backend.ps1
 uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 
 # ⑧ 另开一个终端启动前端
-cd "d:\WeiZhi Works\frontend"
+cd "d:\Smart-Repair-System\frontend"
 npm install          # 首次安装依赖（node_modules）
 npm run dev          # 启动开发服务器
 ```
@@ -159,16 +165,16 @@ npm run dev          # 启动开发服务器
 
 ```powershell
 # 终端 1：启动基础设施
-cd "d:\WeiZhi Works"
+cd "d:\Smart-Repair-System"
 docker-compose up -d
 
 # 终端 2：启动后端
-cd "d:\WeiZhi Works\backend"
+cd "d:\Smart-Repair-System\backend"
 .venv\Scripts\Activate.ps1
 uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 
 # 终端 3：启动前端
-cd "d:\WeiZhi Works\frontend"
+cd "d:\Smart-Repair-System\frontend"
 npm run dev
 ```
 
@@ -181,7 +187,7 @@ npm run dev
 
 ```powershell
 # 新增/修改了数据库模型后，生成并执行迁移
-cd "d:\WeiZhi Works\backend"
+cd "d:\Smart-Repair-System\backend"
 alembic revision --autogenerate -m "描述本次改动"
 alembic upgrade head
 
@@ -206,7 +212,7 @@ python sync_vectors.py
 ### 4.2 首次创建仓库并上传（本项目已做，步骤保留参考）
 
 ```powershell
-cd "d:\WeiZhi Works"
+cd "d:\Smart-Repair-System"
 
 # ① 初始化仓库
 git init
@@ -218,7 +224,7 @@ git add -A                      # 或按需 git add 具体文件/目录
 git status
 
 # ④ 提交
-git commit -m "init: 企业维修知识管理系统初始提交"
+git commit -m "init: Smart-Repair-System 初始提交"
 
 # ⑤ 关联远程仓库（GitHub 上先建好同名仓库）
 git remote add origin https://github.com/你的用户名/Smart-Repair-System.git
@@ -264,6 +270,16 @@ git checkout -b 新分支名         # 创建并切换
 git merge 分支名                # 把指定分支合并到当前分支
 git branch -d 分支名             # 删除已合并的分支
 ```
+
+> **commit 消息建议（可选规范）**：用 `类型: 描述` 格式更专业，GitHub 提交历史一目了然：
+>
+> | 前缀 | 含义 | 例子 |
+> |---|---|---|
+> | `feat:` | 新功能 | `feat: 新增一键初始化脚本 setup.ps1` |
+> | `fix:` | 修复 bug | `fix: 修复 RRF 合并去重错误` |
+> | `docs:` | 文档改动 | `docs: 补充操作指南` |
+> | `refactor:` | 重构（行为不变） | `refactor: 重写查询清洗逻辑` |
+> | `chore:` | 构建/配置等杂务 | `chore: 更新依赖版本` |
 
 ### 4.4 撤销与回滚
 

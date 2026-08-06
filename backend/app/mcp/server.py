@@ -13,7 +13,7 @@ from loguru import logger
 
 from app.mcp import tools
 
-mcp = FastMCP("维知工智维修知识管理系统")
+mcp = FastMCP("Smart-Repair-System")
 
 # 智能工具超时上限（LLM 生成较慢）
 SMART_TIMEOUT = 25.0   # search_knowledge：混合检索 + AnswerAgent
