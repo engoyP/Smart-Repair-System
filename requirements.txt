@@ -1,17 +1,19 @@
 # ============================================================
-# Smart-Repair-System - Python 依赖清单（requirements.txt）
+# Smart-Repair-System - Python 依赖清单（requirements.txt，唯一权威版本）
 #
-# 安装命令（虚拟环境中执行）：
-#   pip install -r requirements.txt
+# 安装命令（虚拟环境中执行，从项目根目录）：
+#   cd backend
+#   python -m venv .venv
+#   .\.venv\Scripts\pip install -r ..\requirements.txt
 # 国内加速：
-#   pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+#   pip install -r ..\requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 # ============================================================
 
 # ---------- FastAPI 核心（Web 框架层）----------
-fastapi==0.109.0               # Web 框架：路由、请求校验、OpenAPI 文档（/docs）
-uvicorn[standard]==0.27.0      # ASGI 服务器：运行 FastAPI 的进程，standard 含性能扩展
-pydantic==2.5.3                # 数据模型/请求校验：FastAPI 的底层依赖
-pydantic-settings==2.1.0       # 配置管理：读取 .env 环境变量到 Pydantic 模型
+fastapi==0.135.3               # Web 框架：路由、请求校验、OpenAPI 文档（/docs）
+uvicorn[standard]==0.42.0      # ASGI 服务器：运行 FastAPI 的进程，standard 含性能扩展
+pydantic==2.12.5                # 数据模型/请求校验：FastAPI 的底层依赖
+pydantic-settings==2.14.2       # 配置管理：读取 .env 环境变量到 Pydantic 模型
 
 # ---------- 数据库（PostgreSQL + ORM）----------
 sqlalchemy==2.0.25             # ORM：把 Python 类映射到 PostgreSQL 表
@@ -23,31 +25,31 @@ asyncpg==0.29.0                # PostgreSQL 驱动（异步，供 async 场景�
 redis==5.0.1                   # Redis 客户端：会话持久化 + 缓存（cache_service）
 
 # ---------- LangChain + LangGraph（多 Agent 编排）----------
-langchain==0.1.20              # LLM 应用框架：模型调用、提示词、链式工具
-langchain-openai==0.1.6        # OpenAI 兼容适配：DeepSeek API 走这个通道
-langchain-community==0.0.38    # 社区集成（工具、向量库适配等）
-langgraph==0.0.28              # Agent 图编排：StateGraph 状态机（意图路由/检索循环）
-langsmith==0.1.50              # LangChain 官方追踪 SDK（可选）
+langchain==1.3.13              # LLM 应用框架：模型调用、提示词、链式工具
+langchain-openai==1.2.2        # OpenAI 兼容适配：DeepSeek API 走这个通道
+langchain-community==0.4.2     # 社区集成（工具、向量库适配等）
+langgraph==1.2.6               # Agent 图编排：StateGraph 状态机（意图路由/导入流水线）
+langsmith==0.10.2              # LangChain 官方追踪 SDK（可选）
 fastmcp==3.4.5                 # MCP Server 框架：暴露检索/工单等工具给外部 AI 客户端（app/mcp/server.py）
 
 # ---------- 向量数据库（Milvus，语义检索）----------
 pymilvus==2.4.15               # Milvus 官方 Python 客户端：插入/查询向量
-langchain-milvus==0.1.4        # LangChain 的 Milvus 向量库封装（本系统直接用了 pymilvus）
+setuptools==80.9.0             # pymilvus 2.4.15 运行期需要 pkg_resources（setuptools 81+ 已移除）
 
 # ---------- 数据处理与安全 ----------
-pandas==2.2.0                  # 数据处理：工单导入 Excel、报表分析
-numpy==1.26.3                  # 数值计算：向量运算的底层依赖
-python-multipart==0.0.6        # 文件/表单上传解析（FastAPI 上传接口需要）
+pandas==3.0.3                  # 数据处理：工单导入 Excel、报表分析
+numpy==2.4.4                   # 数值计算：向量运算的底层依赖
+python-multipart==0.0.32       # 文件/表单上传解析（FastAPI 上传接口需要）
 python-jose[cryptography]==3.3.0  # JWT 生成与校验：登录令牌（access_token）
 passlib[bcrypt]==1.7.4         # 密码哈希：bcrypt 加密存储用户密码
 
 # ---------- Embedding 模型（Qwen3-Embedding-0.6B）----------
-torch>=2.0.0                   # PyTorch 深度学习框架：运行本地模型推理（体积最大）
-transformers>=4.40.0           # HuggingFace 模型库：加载/运行 Qwen3-Embedding
+torch==2.6.0                    # PyTorch 深度学习框架：运行本地模型推理（体积最大）
+transformers>=4.40.0            # HuggingFace 模型库：加载/运行 Qwen3-Embedding
 
 # ---------- HTTP 客户端 ----------
-httpx==0.26.0                  # 异步 HTTP 客户端：调用 DeepSeek、钉钉 API
-aiohttp==3.9.3                 # 异步 HTTP：钉钉 Stream 长连接推送事件
+httpx==0.28.1                  # 异步 HTTP 客户端：调用 DeepSeek、钉钉 API
+aiohttp==3.13.5                 # 异步 HTTP：钉钉 Stream 长连接推送事件
 requests==2.33.1               # 同步 HTTP 客户端：钉钉 API 调用、LangFuse/RAGFlow 追踪上报
 
 # ---------- 钉钉集成 ----------
@@ -62,6 +64,6 @@ APScheduler==3.11.3            # 定时任务调度：钉钉 OA 审批状态轮�
 alibabacloud_dysmsapi20170525>=3.1.0  # 阿里云短信 SDK：验证码/通知短信（SMS_ENABLED=true 时生效）
 
 # ---------- 测试 ----------
-pytest==8.0.0                  # Python 测试框架
-pytest-asyncio==0.23.4         # pytest 异步测试支持
-pytest-cov==4.1.0              # 测试覆盖率统计
+pytest==9.1.1                  # Python 测试框架
+pytest-asyncio==1.4.0          # pytest 异步测试支持
+pytest-cov==7.1.0              # 测试覆盖率统计

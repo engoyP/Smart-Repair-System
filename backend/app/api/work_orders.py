@@ -460,6 +460,20 @@ def delete_work_order(work_order_id: int, db: Session = Depends(get_db), current
 
 # ========== 内部函数 ==========
 
+def _join_fault_codes(*parts) -> str:
+    """合并多来源的故障码/设备错误码（去重，逗号分隔）——系统故障码 + 设备错误码"""
+    seen, out = set(), []
+    for p in parts:
+        if not p:
+            continue
+        for c in str(p).replace("，", ",").split(","):
+            c = c.strip()
+            if c and c not in seen:
+                seen.add(c)
+                out.append(c)
+    return ", ".join(out)
+
+
 def _auto_publish_knowledge(wo: WorkOrder, db: Session) -> bool:
     """
     从工单提取知识 → 去重 → 直接发布到知识库
@@ -478,6 +492,7 @@ def _auto_publish_knowledge(wo: WorkOrder, db: Session) -> bool:
     wo_data = {
         "fault_description": wo.fault_description,
         "fault_code": wo.fault_code,
+        "device_error_code": wo.device_error_code,   # 设备运行日志错误码（SV0436 等），提取器可识别
         "fault_phenomenon": wo.fault_phenomenon,
         "root_cause": wo.root_cause,
         "solution_steps": wo.solution_steps,
@@ -503,11 +518,12 @@ def _auto_publish_knowledge(wo: WorkOrder, db: Session) -> bool:
         return False
 
     # 创建并发布知识
+    # 知识条目的故障码 = 系统故障码 + 设备错误码合并（让检索"报SV0436"能命中该工单案例）
     knowledge = KnowledgeItem(
         title=extracted.title,
         content=extracted.content,
         device_type=extracted.device_type,
-        fault_code=extracted.fault_code,
+        fault_code=_join_fault_codes(extracted.fault_code, wo.device_error_code),
         fault_tags=extracted.fault_tags,
         source_type="WORK_ORDER",
         source_id=wo.id,
@@ -516,6 +532,7 @@ def _auto_publish_knowledge(wo: WorkOrder, db: Session) -> bool:
             "work_order_no": wo.work_order_no,
             "dedup_score": dedup.similarity_score,
             "keywords": extracted.keywords,
+            "device_error_code": wo.device_error_code,
         },
     )
     db.add(knowledge)

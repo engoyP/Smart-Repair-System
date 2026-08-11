@@ -1,3 +1,5 @@
+# 构建命令（构建上下文必须是项目根目录，才能引用根目录的 requirements.txt）：
+#   docker build -f backend/Dockerfile -t smart-repair-system .
 FROM python:3.11-slim
 
 WORKDIR /app
@@ -10,7 +12,7 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+COPY backend/ .
 
 RUN mkdir -p logs
 

@@ -95,7 +95,7 @@ if (-not $SkipBackend) {
     if (Test-Path $VenvPython) {
         Write-Host "  安装依赖（清华镜像加速，含 torch 体积较大，请耐心等待）..."
         & $VenvPython -m pip install --upgrade pip -i $PipMirror | Out-Host
-        & $VenvPython -m pip install -r requirements.txt -i $PipMirror | Out-Host
+        & $VenvPython -m pip install -r (Join-Path $RootDir "requirements.txt") -i $PipMirror | Out-Host
         if ($LASTEXITCODE -eq 0) { Ok "Python 依赖安装完成" } else { Fail "依赖安装失败，请检查网络后重试" }
     } else {
         Fail "虚拟环境创建失败"
@@ -186,5 +186,5 @@ Write-Host "  终端 3 - 前端:" -ForegroundColor Yellow
 Write-Host "      cd frontend"
 Write-Host "      npm run dev"
 Write-Host ""
-Write-Host "  访问: http://127.0.0.1:5173   接口文档: http://127.0.0.1:8000/docs" -ForegroundColor Green
+Write-Host "  访问: http://127.0.0.1:3000   接口文档: http://127.0.0.1:8000/docs" -ForegroundColor Green
 Write-Host ""

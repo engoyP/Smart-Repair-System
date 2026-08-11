@@ -13,14 +13,14 @@ class Settings(BaseSettings):
     APP_NAME: str = "Smart-Repair-System"
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = True
-    BACKEND_PORT: int = 8000
+    BACKEND_PORT: int = 18080
 
     # 数据库配置
     DB_USER: str = "admin"
     DB_PASSWORD: str = "admin123"
     DB_NAME: str = "maintenance_db"
     DB_HOST: str = "localhost"
-    DB_PORT: int = 5432
+    DB_PORT: int = 15432
     DATABASE_URL: str = ""
 
     # Redis 配置
@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     MILVUS_PORT: int = 19530
     MILVUS_REST_PORT: int = 9091
     MILVUS_COLLECTION: str = "knowledge"
+    MILVUS_LOG_CODE_COLLECTION: str = "log_code"  # 设备手册错误码向量集合
     MILVUS_VECTOR_SIZE: int = 1024  # Embedding 维度 (Qwen3-0.6B hidden_size=1024)
     MINIO_HOST: str = "localhost"
     MINIO_PORT: int = 9000

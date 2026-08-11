@@ -154,6 +154,8 @@ class GuidedRepairAgent:
                 model=settings.DEEPSEEK_MODEL,
                 temperature=0.5,
                 streaming=True,
+                timeout=60,            # 单轮引导生成超时 60s，超时给用户可感知的失败提示
+                max_retries=2,
             )
         return self._llm
 

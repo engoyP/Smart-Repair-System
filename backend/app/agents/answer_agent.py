@@ -55,6 +55,10 @@ class AnswerAgent:
 
 4. **不提供通用建议**：不要提供检索案例中没有的「通用排查步骤」或「常规注意事项」。不得自行发挥，不得使用案例之外的维修经验或常识。
 
+5. **注明来源**：检索案例会标注来源类型（「手册」= 设备说明书/维修手册，含错误码/章节/页码；「工单案例」= 历史维修工单）。回答引用某案例内容时，在该结论后注明出处：
+   - 手册：`（来源：<手册名>·<章节>·<页码>·错误码 <错误码>）`
+   - 工单案例：`（来源：工单案例）`
+
 ## 问题类型判断（重要）
 
 根据用户问题的性质，选择以下对应的回答格式：
@@ -83,6 +87,31 @@ class AnswerAgent:
     # 案例相关度阈值：低于此分数视为不相关，不送入 LLM
     SCORE_THRESHOLD = 0.15
 
+    MULTI_FAULT_PROMPT = """你是一个设备维修知识库的维修专家。用户的问题中描述了同一设备同时出现的多个故障现象，你需要**按故障分组**给出分析。
+
+## 核心规则（严格遵守）
+
+1. **按故障分节输出**：每个故障输出一个完整小节，小节结构为：
+   - **故障现象**
+   - **可能原因**（基于该故障的检索案例，按可能性排序）
+   - **排查方向**（结合案例给出具体的检查顺序、测量参数、判断标准）
+   - **处理方案**（案例中的维修方法和操作步骤）
+   - **预防建议**（案例中有则写，没有写"案例中未提及预防措施"）
+
+2. **只基于各组检索案例回答**：每个故障小节只能引用"按故障分组的检索案例"中该故障自己的案例内容，不得编造、推测，不得用其他故障的案例凑数。
+
+3. **未检索到案例的故障必须显式说明**：若某个故障没有对应案例，在该小节明确写"知识库中未检索到与该故障直接相关的历史案例"。
+
+4. **分数由系统决定**：案例相关度分数来自检索系统，不得修改、重打分或编造。
+
+5. **不提供通用建议**：不要提供检索案例中没有的"通用排查步骤"或"常规注意事项"。
+
+## 回答风格
+- 开头一句话总结："该设备共涉及 N 个故障现象，逐一分析如下。"
+- 简体中文，结构清晰，每个故障之间用标题区分（如 **故障1：温度偏高**）
+- **禁止在回答末尾列出参考案例清单**，参考案例由系统界面单独展示
+- 严格基于案例内容，不添加案例中没有的信息"""
+
     def __init__(self):
         self._llm: Optional[ChatOpenAI] = None
 
@@ -95,6 +124,8 @@ class AnswerAgent:
                 model=settings.DEEPSEEK_MODEL,
                 temperature=0.5,
                 streaming=True,
+                timeout=90,            # 回答生成（流式）超时 90s，超时返回"生成失败"而非无限挂起
+                max_retries=2,
             )
         return self._llm
 
@@ -345,8 +376,15 @@ class AnswerAgent:
             score = c.get("score", 0)
             device_type = c.get("device_type", "")
             fault_code = c.get("fault_code", "")
+            # 来源标注：手册条目带出处（手册名/章节/页码/错误码），工单案例标 CASE
+            if c.get("manual_code_id"):
+                source = "手册"
+                cite = f"（{c.get('manual_name', '')}·{c.get('chapter', '')}·{c.get('page', '')}·错误码 {c.get('error_code', '')}）"
+            else:
+                source = "工单案例"
+                cite = ""
             cases_text += f"""
-### 案例 {i}（相关度: {score:.0%}）
+### 案例 {i}（相关度: {score:.0%} · 来源: {source} {cite}）
 - 标题: {title}
 - 设备类型: {device_type}
 - 故障码: {fault_code}
@@ -445,8 +483,15 @@ class AnswerAgent:
             score = c.get("score", 0)
             device_type = c.get("device_type", "")
             fault_code = c.get("fault_code", "")
+            # 来源标注：手册条目带出处（手册名/章节/页码/错误码），工单案例标 CASE
+            if c.get("manual_code_id"):
+                source = "手册"
+                cite = f"（{c.get('manual_name', '')}·{c.get('chapter', '')}·{c.get('page', '')}·错误码 {c.get('error_code', '')}）"
+            else:
+                source = "工单案例"
+                cite = ""
             cases_text += f"""
-### 案例 {i}（相关度: {score:.0%}）
+### 案例 {i}（相关度: {score:.0%} · 来源: {source} {cite}）
 - 标题: {title}
 - 设备类型: {device_type}
 - 故障码: {fault_code}
@@ -496,6 +541,92 @@ class AnswerAgent:
 
         # 发送完成信号
         yield f"data: {json.dumps({'type': 'done', 'confidence': self._estimate_confidence(cases), 'sources_count': len(cases)}, ensure_ascii=False)}\n\n"
+
+    def stream_answer_multi(self, question: str, faults: List[Dict]):
+        """
+        多故障分组流式回答 - 按故障分节生成（专家模式多故障专用）
+
+        Args:
+            question: 用户原始问题
+            faults: [{"name": "子查询/故障名", "cases": [case dict]}]
+
+        Yields:
+            str: SSE 格式的消息片段（与 stream_answer 协议一致）
+        """
+        # 非技术问题 → 直接返回
+        if not self._is_technical_query(question):
+            answer = self._answer_non_technical(question)
+            yield f"data: {json.dumps({'type': 'answer', 'content': answer}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'confidence': 0, 'sources_count': 0}, ensure_ascii=False)}\n\n"
+            return
+
+        # 没有任何案例或相关度过低 → 视为无匹配
+        all_cases = [c for f in faults for c in f.get("cases", [])]
+        max_score = max((c.get("score", 0) for c in all_cases), default=0)
+        if not all_cases or max_score < self.SCORE_THRESHOLD:
+            answer = "未检索到与该问题相关的历史案例。请尝试使用更具体的设备型号或故障描述重新提问。"
+            yield f"data: {json.dumps({'type': 'answer', 'content': answer}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'confidence': 0, 'sources_count': 0}, ensure_ascii=False)}\n\n"
+            return
+
+        # 构建按故障分组的案例文本（每个故障独立小节，缺案例的故障显式标注）
+        faults_text = ""
+        for i, f in enumerate(faults, 1):
+            name = f.get("name", f"故障{i}")
+            cases = f.get("cases", [])
+            faults_text += f"\n## 故障{i}: {name}\n"
+            if not cases:
+                faults_text += "（该故障未检索到案例）\n"
+                continue
+            for j, c in enumerate(cases[:5], 1):
+                title = c.get("title", "")
+                content = c.get("content", "")[:1500]
+                score = c.get("score", 0)
+                device_type = c.get("device_type", "")
+                fault_code = c.get("fault_code", "")
+                faults_text += f"""
+### 案例 {j}（相关度: {score:.0%}）
+- 标题: {title}
+- 设备类型: {device_type}
+- 故障码: {fault_code}
+- 内容:
+{content}
+"""
+
+        user_prompt = f"""## 用户问题
+{question}
+
+## 按故障分组的检索案例
+{faults_text}
+
+## 回答指令
+1. 按上述"按故障分组的检索案例"输出各故障小节，每个故障的小节只引用该故障自己的案例
+2. 有故障无案例时，必须显式说明未检索到案例
+3. 严格基于案例内容回答，不添加案例中没有的信息"""
+
+        yield f"data: {json.dumps({'type': 'thinking'}, ensure_ascii=False)}\n\n"
+
+        try:
+            with tracer.trace("answer_generation_multi", metadata={
+                "question": question,
+                "faults_count": len(faults),
+            }) as trace_ctx:
+                messages = [
+                    SystemMessage(content=self.MULTI_FAULT_PROMPT),
+                    HumanMessage(content=user_prompt),
+                ]
+                for chunk in self.llm.stream(messages):
+                    token = chunk.content if hasattr(chunk, 'content') else str(chunk)
+                    if token:
+                        yield f"data: {json.dumps({'type': 'answer', 'content': token}, ensure_ascii=False)}\n\n"
+                confidence = self._estimate_confidence(all_cases)
+                trace_ctx.score("answer_confidence", confidence)
+        except Exception as e:
+            logger.error(f"[AnswerAgent] 多故障流式生成失败: {e}")
+            yield f"data: {json.dumps({'type': 'answer', 'content': '回答生成失败，请稍后重试。'}, ensure_ascii=False)}\n\n"
+
+        # 发送完成信号
+        yield f"data: {json.dumps({'type': 'done', 'confidence': self._estimate_confidence(all_cases), 'sources_count': len(all_cases)}, ensure_ascii=False)}\n\n"
 
 
 

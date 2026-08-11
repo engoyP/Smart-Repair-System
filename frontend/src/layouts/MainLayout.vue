@@ -173,10 +173,6 @@
                 <el-icon><Calendar /></el-icon>
                 <template #title>排班管理</template>
               </el-menu-item>
-              <el-menu-item index="/work-order-imports">
-                <el-icon><Upload /></el-icon>
-                <template #title>历史工单导入</template>
-              </el-menu-item>
             </template>
 
             <!-- 管理员 / 维修员：全菜单 -->
@@ -200,6 +196,10 @@
                 <el-icon><Reading /></el-icon>
                 <template #title>知识库</template>
               </el-menu-item>
+              <el-menu-item index="/knowledge/manuals">
+                <el-icon><Document /></el-icon>
+                <template #title>设备手册</template>
+              </el-menu-item>
 
               <div class="menu-group-label">基础数据</div>
               <el-menu-item index="/devices">
@@ -222,7 +222,7 @@
                 <el-icon><Connection /></el-icon>
                 <template #title>故障码管理</template>
               </el-menu-item>
-              <el-menu-item v-if="isSupervisor" index="/work-order-imports">
+              <el-menu-item v-if="isSupervisor || isTechnician" index="/work-order-imports">
                 <el-icon><Upload /></el-icon>
                 <template #title>历史工单导入</template>
               </el-menu-item>
@@ -283,9 +283,6 @@
                 <el-menu-item index="/supervisor/schedule">
                   <el-icon><Calendar /></el-icon>
                 </el-menu-item>
-                <el-menu-item index="/work-order-imports">
-                  <el-icon><Upload /></el-icon>
-                </el-menu-item>
               </template>
               <!-- 管理员/维修员完整版 -->
               <template v-else>
@@ -301,6 +298,9 @@
                 <el-menu-item index="/knowledge">
                   <el-icon><Reading /></el-icon>
                 </el-menu-item>
+                <el-menu-item index="/knowledge/manuals">
+                  <el-icon><Document /></el-icon>
+                </el-menu-item>
                 <el-menu-item index="/devices">
                   <el-icon><Monitor /></el-icon>
                 </el-menu-item>
@@ -313,7 +313,7 @@
                 <el-menu-item index="/fault-codes">
                   <el-icon><Connection /></el-icon>
                 </el-menu-item>
-                <el-menu-item v-if="isSupervisor" index="/work-order-imports">
+                <el-menu-item v-if="isSupervisor || isTechnician" index="/work-order-imports">
                   <el-icon><Upload /></el-icon>
                 </el-menu-item>
                 <template v-if="isSupervisor">
@@ -388,6 +388,9 @@ const isSupervisor = computed(() => {
 
 // 纯主管（仅 SUPERVISOR，不含 ADMIN）：菜单精简版
 const isPureSupervisor = computed(() => currentUser.role === 'SUPERVISOR')
+
+// 维修员（TECHNICIAN）：历史工单导入等负责核对确认的功能
+const isTechnician = computed(() => currentUser.role === 'TECHNICIAN')
 
 // ===== 当前用户 =====
 const currentUser = reactive({

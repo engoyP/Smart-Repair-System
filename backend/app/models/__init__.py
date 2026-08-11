@@ -15,6 +15,7 @@ from app.models.leave_request import (
 )
 from app.models.sys_config import SysConfig
 from app.models.notification import Notification
+from app.models.manual_code import ManualCodeEntry
 
 __all__ = [
     "Device", "WorkOrder", "WorkOrderStatus",
@@ -31,4 +32,5 @@ __all__ = [
     "LeaveType", "LeaveRequestStatus", "LeaveShift",
     "SysConfig",
     "Notification",
+    "ManualCodeEntry",
 ]

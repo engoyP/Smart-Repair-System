@@ -31,12 +31,13 @@ IMPORT_DIR = os.path.join(
     "uploads", "pdf_import",
 )
 
-_MANAGE_ROLES = {UserRole.ADMIN.value, UserRole.SUPERVISOR.value, "MANAGER"}
+# 历史工单由维修员（TECHNICIAN）负责核对确认，管理员/主管保留权限
+_MANAGE_ROLES = {UserRole.ADMIN.value, UserRole.SUPERVISOR.value, UserRole.TECHNICIAN.value, "MANAGER"}
 
 
 def _require_manage(current_user: User):
     if current_user.role not in _MANAGE_ROLES:
-        raise HTTPException(status_code=403, detail="仅管理员/主管可执行历史工单导入")
+        raise HTTPException(status_code=403, detail="仅管理员/主管/维修员可执行历史工单导入")
 
 
 # ============================================================

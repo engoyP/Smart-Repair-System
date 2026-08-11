@@ -10,6 +10,7 @@
         <el-descriptions :column="2" border>
           <el-descriptions-item label="故障描述" :span="2">{{ form.fault_description || '-' }}</el-descriptions-item>
           <el-descriptions-item label="故障码">{{ displayFaultCodes || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="设备错误码">{{ form.device_error_code || '-' }}</el-descriptions-item>
           <template v-if="form.device_id">
             <el-descriptions-item label="设备">
               <div style="display:flex;align-items:center;gap:8px">
@@ -73,6 +74,81 @@
     <!-- 编辑模式 -->
     <template v-if="!isViewMode">
       <div class="form-body">
+        <!-- 录入模式切换：标准录入 / 错误码录入 -->
+        <div class="mode-switch-bar">
+          <span class="mode-switch-label">录入方式</span>
+          <div class="mode-switch">
+            <span class="mode-tab" :class="{ active: entryMode === 'standard' }" @click="switchEntryMode('standard')">标准录入</span>
+            <span class="mode-tab" :class="{ active: entryMode === 'error_code' }" @click="switchEntryMode('error_code')">错误码录入</span>
+          </div>
+        </div>
+
+        <!-- 错误码录入模式：手册 + 工单案例检索预填 -->
+        <template v-if="entryMode === 'error_code'">
+          <el-card shadow="never" class="section-card error-code-card">
+            <template #header>
+              <div class="card-header-row">
+                <span class="section-title">错误码检索预填</span>
+                <span class="mode-tip">输入设备运行日志/屏幕报警的错误码，匹配设备手册标准处理 + 历史工单案例，一键预填</span>
+              </div>
+            </template>
+            <div class="ec-search">
+              <el-input
+                v-model="ecQuery"
+                placeholder="输入错误码，如 SV0436 / 6401（也可输入故障描述）"
+                clearable
+                style="flex:1"
+                @keydown.enter="ecSearch"
+              />
+              <el-button type="primary" :loading="ecSearching" @click="ecSearch">检索</el-button>
+            </div>
+            <div v-if="ecError" class="ec-error">{{ ecError }}</div>
+            <template v-if="ecResults">
+              <div class="ec-results">
+                <div v-if="!ecResults.manual_items.length && !ecResults.case_items.length" class="ec-empty">
+                  未检索到相关手册或工单案例
+                </div>
+                <div v-if="ecResults.manual_items.length" class="ec-group">
+                  <div class="ec-group-title">设备手册（权威标准处理）</div>
+                  <div v-for="m in ecResults.manual_items" :key="m.manual_code_id" class="ec-item manual">
+                    <div class="ec-item-header">
+                      <span class="ec-code">{{ m.error_code }}</span>
+                      <span class="ec-title">{{ m.title }}</span>
+                      <el-tag v-if="m.manual_name" size="small" type="info">{{ m.manual_name }}</el-tag>
+                      <el-tag v-if="m.chapter" size="small" effect="plain">{{ m.chapter }}</el-tag>
+                      <el-tag v-if="m.page" size="small" effect="plain">P{{ m.page }}</el-tag>
+                    </div>
+                    <div v-if="m.description" class="ec-desc">{{ m.description }}</div>
+                    <div v-if="m.causes" class="ec-block">
+                      <span class="ec-block-label">可能原因</span>{{ m.causes }}
+                    </div>
+                    <div v-if="m.solutions" class="ec-block">
+                      <span class="ec-block-label">标准处理</span>{{ m.solutions }}
+                    </div>
+                    <div class="ec-item-footer">
+                      <el-button size="small" type="primary" @click="applyManualItem(m)">选用此方案</el-button>
+                    </div>
+                  </div>
+                </div>
+                <div v-if="ecResults.case_items.length" class="ec-group">
+                  <div class="ec-group-title">历史工单案例（真实处理记录）</div>
+                  <div v-for="c in ecResults.case_items" :key="c.knowledge_id" class="ec-item case">
+                    <div class="ec-item-header">
+                      <span class="ec-title">{{ c.title }}</span>
+                      <el-tag v-if="c.device_type" size="small" type="info">{{ c.device_type }}</el-tag>
+                      <el-tag v-if="c.fault_code" size="small" type="warning">{{ c.fault_code }}</el-tag>
+                    </div>
+                    <div v-if="c.content" class="ec-desc">{{ c.content }}</div>
+                    <div class="ec-item-footer">
+                      <el-button size="small" type="primary" plain @click="applyCaseItem(c)">引用此案例</el-button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </template>
+          </el-card>
+        </template>
+
         <template v-if="analysisResult">
           <el-card shadow="never" class="section-card analysis-card">
             <template #header>
@@ -318,6 +394,13 @@
                 </div>
                 <div class="cascader-hint">如故障码不存在可点击「+ 新增」填写描述自动生成</div>
               </el-form-item>
+              <el-form-item label="设备错误码">
+                <el-input
+                  v-model="form.device_error_code"
+                  placeholder="设备运行日志/屏幕报警的错误码，如 SV0436、6401（多个用逗号分隔）"
+                />
+                <div class="cascader-hint">仅带错误码的机电设备填写，提交后自动沉淀到知识库，后续提问该错误码可被检索</div>
+              </el-form-item>
             </div>
 
             <div class="form-section">
@@ -406,7 +489,11 @@
                   : `归档完成度不足（${Math.round(archiveCheckResult.completeness * 100)}%），缺失：${(archiveCheckResult.missing_fields || []).join('、')}`)
               : '请先点击「工单归档」完成校验，再点击「归档完成」' }}
         </p>
-        <p v-else-if="!canSubmit && !isNew" class="submit-hint">请先点击「AI 校验」完成分析后再提交</p>
+        <p v-else-if="!canSubmit && !isNew" class="submit-hint">
+          {{ entryMode === 'error_code'
+              ? '请先通过「错误码检索」选用方案（或填写故障描述），再提交'
+              : '请先点击「AI 校验」完成分析后再提交' }}
+        </p>
       </div>
     </template>
 
@@ -557,6 +644,7 @@ const form = reactive({
   fault_phenomenon_type: '',
   fault_phenomenon: '',
   fault_code: [],
+  device_error_code: '',
   root_cause_category: '',
   root_cause_type: '',
   root_cause: '',
@@ -587,7 +675,118 @@ const analyzing = ref(false)
 const submitting = ref(false)
 const saving = ref(false)
 const analysisResult = ref(null)
-const canSubmit = computed(() => !!analysisResult.value)
+const entryMode = ref('standard')          // standard 标准录入 | error_code 错误码录入
+const ecQuery = ref('')                    // 错误码检索输入
+const ecSearching = ref(false)
+const ecResults = ref(null)                // { manual_items, case_items, error_codes }
+const ecError = ref('')
+// 错误码录入模式：手册即权威方案，填了故障描述即可直接提交；标准模式仍需 AI 校验
+const canSubmit = computed(() => entryMode.value === 'error_code'
+  ? !!form.fault_description
+  : !!analysisResult.value)
+
+const isFormDirty = () => {
+  return !!(form.device_id || form.device_error_code || form.fault_description ||
+    form.fault_phenomenon || form.fault_code.length || form.root_cause ||
+    form.solution_steps || form.repair_result || form.follow_up_plan ||
+    usedParts.value.length || attachments.value.length || timeRange.value)
+}
+
+// 清空工单表单（保留工单编号/状态/技术员等系统字段）
+const resetFormFields = () => {
+  form.device_id = null
+  form.device_type = ''
+  form.location = ''
+  form.fault_description = ''
+  form.fault_category = ''
+  form.fault_phenomenon_type = ''
+  form.fault_phenomenon = ''
+  form.fault_code = []
+  form.device_error_code = ''
+  form.root_cause_category = ''
+  form.root_cause_type = ''
+  form.root_cause = ''
+  form.solution_steps = ''
+  form.solution_ref_knowledge_id = null
+  form.repair_result = ''
+  form.follow_up_plan = ''
+  form.work_hours = null
+  form.tags = []
+  form.fault_tags = []
+  faultPhenomenonCascader.value = []
+  rootCauseCascader.value = []
+  timeRange.value = null
+  usedParts.value = []
+  attachments.value = []
+  uploadFileList.value = []
+  deviceMaintenance.value = null
+  analysisResult.value = null
+  archiveCheckResult.value = null
+}
+
+const switchEntryMode = (mode) => {
+  if (entryMode.value === mode) return
+  const confirmSwitch = () => {
+    resetFormFields()
+    ecResults.value = null
+    ecQuery.value = ''
+    entryMode.value = mode
+  }
+  if (isFormDirty()) {
+    ElMessageBox.confirm('切换录入模式将清空当前已填写的内容，是否继续？', '切换确认', {
+      confirmButtonText: '继续', cancelButtonText: '取消', type: 'warning',
+    }).then(confirmSwitch).catch(() => {})
+  } else {
+    confirmSwitch()
+  }
+}
+
+// 错误码检索：手册 + 工单案例
+const ecSearch = async () => {
+  const q = ecQuery.value.trim()
+  if (!q) {
+    ElMessage.warning('请输入错误码或故障描述')
+    return
+  }
+  ecSearching.value = true
+  ecError.value = ''
+  try {
+    const res = await request.post('/search/manual-lookup', { query: q, top_k: 5 })
+    ecResults.value = res
+  } catch (e) {
+    ecError.value = '检索失败，请稍后重试'
+  } finally {
+    ecSearching.value = false
+  }
+}
+
+// 错误码去重累计（逗号分隔）
+const addDeviceErrorCode = (code) => {
+  const c = (code || '').trim().toUpperCase()
+  if (!c) return
+  const existing = (form.device_error_code || '').split(',').map(x => x.trim().toUpperCase()).filter(Boolean)
+  if (!existing.includes(c)) existing.push(c)
+  form.device_error_code = existing.join(',')
+}
+
+// 选用手册条目：一键预填工单（错误码 → device_error_code，标准处理 → 处理步骤）
+const applyManualItem = (m) => {
+  addDeviceErrorCode(m.error_code)
+  if (m.device_type && !form.device_type) form.device_type = m.device_type
+  form.fault_description = m.title || m.description || form.fault_description
+  if (m.description && !form.fault_phenomenon) form.fault_phenomenon = m.description
+  if (m.causes) form.root_cause = m.causes
+  if (m.solutions) form.solution_steps = m.solutions
+  ElMessage.success(`已选用手册方案：${m.error_code} ${m.title}`)
+}
+
+// 引用工单案例：预填故障描述与故障码，处理步骤供参考
+const applyCaseItem = (c) => {
+  form.fault_description = c.title || form.fault_description
+  if (c.device_type && !form.device_type) form.device_type = c.device_type
+  if (c.fault_code && !form.fault_code.includes(c.fault_code)) form.fault_code.push(c.fault_code)
+  ElMessage.success(`已引用案例：${c.title}`)
+}
 const archiving = ref(false)
 const archiveCheckResult = ref(null)
 const canArchiveComplete = computed(() => !!archiveCheckResult.value?.passed)
@@ -942,6 +1141,7 @@ const saveForm = async () => {
       'repair_result','follow_up_plan','work_hours',
       'used_parts','assignee_id',
       'location','status','tags','attachments',
+      'device_error_code',
     ]
     const data = { fault_description: form.fault_description || '' }
     for (const k of validFields) {
@@ -1147,15 +1347,52 @@ const sendAIMessage = async () => {
     aiDialog.input = ''
   }
 
+  const question = aiDialog.messages[aiDialog.messages.length - 1].content
+  const aiMsg = { role: 'assistant', content: '' }
+  aiDialog.messages.push(aiMsg)
   aiDialog.loading = true
+
   try {
-    const res = await request.post('/search/answer', {
-      question: aiDialog.messages[aiDialog.messages.length - 1].content,
-      top_k: 5,
-    }, { timeout: 120000 })
-    aiDialog.messages.push({ role: 'assistant', content: res.answer || '抱歉，无法生成回答。' })
-  } catch {
-    aiDialog.messages.push({ role: 'assistant', content: '请求失败，请稍后重试。' })
+    const response = await fetch('/api/v1/search/answer/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question, top_k: 5 }),
+    })
+
+    if (!response.ok) {
+      aiMsg.content = '请求失败，请稍后重试。'
+      return
+    }
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || ''
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue
+        try {
+          const data = JSON.parse(line.slice(6))
+          if (data.type === 'answer' && data.content) {
+            aiMsg.content += data.content
+          }
+        } catch { /* skip */ }
+      }
+      await nextTick()
+      if (aiMsgRef.value) aiMsgRef.value.scrollTop = aiMsgRef.value.scrollHeight
+    }
+
+    if (!aiMsg.content) aiMsg.content = '抱歉，无法生成回答。'
+  } catch (e) {
+    console.error('AI 发送失败:', e)
+    aiMsg.content = '请求失败，请稍后重试。'
   } finally {
     aiDialog.loading = false
     await nextTick()
@@ -1321,4 +1558,36 @@ onMounted(async () => {
   background: #49ad17 !important;
   border-color: #49ad17 !important;
 }
+/* 录入模式切换 */
+.mode-switch-bar { display: flex; align-items: center; gap: 12px; max-width: 860px; margin: 0 auto 16px; }
+.mode-switch-label { font-size: 13px; color: #86909C; }
+.mode-switch {
+  display: flex; gap: 4px; background: #F2F3F5; border-radius: 8px; padding: 3px;
+}
+.mode-tab {
+  padding: 5px 14px; border-radius: 6px; font-size: 13px; cursor: pointer;
+  color: #86909C; font-weight: 500; transition: all .2s; white-space: nowrap;
+}
+.mode-tab:hover { color: #4E5969; }
+.mode-tab.active { background: #fff; color: #0FC6C2; box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
+/* 错误码检索预填 */
+.error-code-card { margin-bottom: 16px; }
+.error-code-card :deep(.el-card__header) { padding: 10px 16px; }
+.mode-tip { font-size: 12px; color: #86909C; }
+.ec-search { display: flex; gap: 8px; margin-bottom: 12px; }
+.ec-error { color: #F53F3F; font-size: 13px; margin-bottom: 8px; }
+.ec-results { max-height: 480px; overflow-y: auto; }
+.ec-group { margin-bottom: 14px; }
+.ec-group-title { font-size: 13px; font-weight: 600; color: #4E5969; margin-bottom: 8px; }
+.ec-item { border: 1px solid #E5E6EB; border-radius: 6px; padding: 10px 12px; margin-bottom: 8px; }
+.ec-item.manual { border-left: 3px solid #FF7D00; background: #FFFDF9; }
+.ec-item.case { border-left: 3px solid var(--color-primary); }
+.ec-item-header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+.ec-code { font-weight: 700; color: #E6A23C; font-size: 14px; }
+.ec-title { font-weight: 600; font-size: 14px; color: #1D2129; }
+.ec-desc { font-size: 13px; color: #4E5969; line-height: 1.6; margin-bottom: 6px; }
+.ec-block { font-size: 13px; color: #4E5969; line-height: 1.7; margin-bottom: 4px; }
+.ec-block-label { font-weight: 600; color: #1D2129; margin-right: 6px; }
+.ec-item-footer { display: flex; justify-content: flex-end; margin-top: 6px; }
+.ec-empty { text-align: center; color: #C9CDD4; padding: 30px 0; font-size: 14px; }
 </style>

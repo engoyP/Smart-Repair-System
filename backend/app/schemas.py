@@ -74,6 +74,7 @@ class WorkOrderCreate(BaseModel):
     device_id: Optional[int] = None
     device_code: Optional[str] = None
     fault_code: Optional[str] = None
+    device_error_code: Optional[str] = None
     fault_description: str
     fault_category: Optional[str] = None
     fault_phenomenon_type: Optional[str] = None
@@ -105,6 +106,7 @@ class WorkOrderUpdate(BaseModel):
     device_id: Optional[int] = None
     device_code: Optional[str] = None
     fault_code: Optional[str] = None
+    device_error_code: Optional[str] = None
     fault_description: Optional[str] = None
     fault_category: Optional[str] = None
     fault_phenomenon_type: Optional[str] = None
@@ -136,6 +138,7 @@ class WorkOrderResponse(BaseModel):
     device_id: Optional[int]
     device_code: Optional[str] = None
     fault_code: Optional[str]
+    device_error_code: Optional[str] = None
     fault_description: str
     fault_category: Optional[str] = None
     fault_phenomenon_type: Optional[str] = None

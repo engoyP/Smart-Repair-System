@@ -72,39 +72,24 @@ def _normalize_work_order_no(raw: str) -> str:
 # 1. 知识检索（智能工具，可能耗时数秒~十几秒）
 # ============================================================
 def search_knowledge(query: str) -> str:
-    """按系统 /answer 底层逻辑检索：向量+BM25 混合检索 → RRF 融合 → 加权重排 → AnswerAgent 回答"""
+    """按系统 /answer 底层逻辑检索：双库检索 → RRF 融合 → 严格过滤重排 → AnswerAgent 回答
+
+    走公共编排层 app.agents.retrieval_flow（与智能问答/专家模式同一套检索逻辑，保证策略一致）。
+    """
     if not query or not query.strip():
         return "请输入故障描述，例如：注塑机 温度过高"
     try:
-        from app.core.vector_store import vector_store
-        from app.core.embeddings import encode_text
-        from app.agents.tools import RetrievalTools, rrf_merge, weighted_rerank
+        from app.agents.retrieval_flow import retrieve_hybrid, extract_device_and_fault, filter_rerank_cases
         from app.agents.answer_agent import answer_agent
 
-        tools = RetrievalTools(
-            db_session_factory=SessionLocal,
-            vector_store=vector_store,
-            embedding_fn=encode_text,
+        merged, error_codes, tools = retrieve_hybrid(query, top_k=10)
+        device, kws = extract_device_and_fault(tools, query)
+        cases = filter_rerank_cases(
+            tools, merged, query, top_n=5,
+            require_device=device, require_keywords=tuple(kws),
+            error_codes=error_codes,
         )
-        vector_result = tools.vector_search(query=query, top_k=10, score_threshold=0.0)
-        bm25_result = tools.bm25_search(query=query, top_k=10)
-        result_sets = []
-        if vector_result.success:
-            result_sets.append(vector_result.data)
-        if bm25_result.success:
-            result_sets.append(bm25_result.data)
-        merged = rrf_merge(result_sets, top_n=10) if result_sets else []
-
-        # 过滤 + 加权重排（与系统 /answer 一致：故障原因权重 0.4、设备惩罚 0.15）
-        filtered_merged = [m for m in merged if not m.get("rrf_only", False) and m.get("score", 0) >= 0.15]
-        cleaned_q = tools.query_extractor.extract(query, use_llm_fallback=False)
-        filtered_merged = weighted_rerank(filtered_merged, query,
-                                          fault_weight=0.4, device_penalty=0.15,
-                                          cleaned_query=cleaned_q)
-        filtered_merged.sort(key=lambda x: x.get("score", 0), reverse=True)
-        filtered_merged = [m for m in filtered_merged if m.get("score", 0) >= 0.15][:5]
-
-        result = answer_agent.answer(query, filtered_merged)
+        result = answer_agent.answer(query, cases)
         return result.answer
     except Exception as e:
         logger.warning(f"[MCP] 知识检索失败: {e}")

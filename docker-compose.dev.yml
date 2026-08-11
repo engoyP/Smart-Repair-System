@@ -9,9 +9,9 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD:-admin123}
       POSTGRES_DB: ${DB_NAME:-maintenance_db}
     ports:
-      - "${DB_PORT:-5432}:5432"
+      - "${DB_PORT:-15432}:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - weizhiworks_postgres_data:/var/lib/postgresql/data
       - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
     restart: unless-stopped
     healthcheck:
@@ -54,11 +54,11 @@ services:
       retries: 5
 
   minio:
-    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    image: minio/minio:RELEASE.2025-02-28T09-55-16Z
     container_name: maintenance_minio
     environment:
-      MINIO_ACCESS_KEY: minioadmin
-      MINIO_SECRET_KEY: minioadmin
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
     command: minio server /minio_data --console-address ":9001"
     ports:
       - "${MINIO_PORT:-9000}:9000"
@@ -95,8 +95,22 @@ services:
       timeout: 20s
       retries: 5
 
+  # Attu - Milvus Web 管理界面（查看集合/字段/向量数据）
+  attu:
+    image: zilliz/attu:v2.4
+    container_name: maintenance_attu
+    environment:
+      - MILVUS_URL=http://milvus:19530
+    ports:
+      - "${ATTU_PORT:-8080}:3000"
+    depends_on:
+      milvus:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
-  postgres_data:
+  weizhiworks_postgres_data:
+    external: true
   redis_data:
   etcd_data:
   minio_data:

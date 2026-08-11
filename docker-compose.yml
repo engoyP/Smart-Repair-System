@@ -8,9 +8,9 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD:-admin123}
       POSTGRES_DB: ${DB_NAME:-maintenance_db}
     ports:
-      - "${DB_PORT:-5432}:5432"
+      - "${DB_PORT:-15432}:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - weizhiworks_postgres_data:/var/lib/postgresql/data
       - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
     restart: unless-stopped
     healthcheck:
@@ -96,7 +96,9 @@ services:
       retries: 5
 
 volumes:
-  postgres_data:
+  # 项目原名为 WeiZhi Works，真实数据在旧卷里（含 users 等 18 张表）
+  weizhiworks_postgres_data:
+    external: true
   redis_data:
   etcd_data:
   minio_data:

@@ -69,6 +69,8 @@ class DedupAgent:
                 model=settings.DEEPSEEK_MODEL,
                 temperature=0.1,
                 streaming=False,
+                timeout=30,            # 去重判定超时 30s，超时走保守策略（不判重复）
+                max_retries=1,
             )
         return self._llm
 

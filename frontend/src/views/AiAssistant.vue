@@ -53,7 +53,7 @@
                 <!-- 正常显示：标题 + 编辑按钮 -->
                 <div class="item-title-row">
                   <div class="item-title">{{ s.title }}</div>
-                  <span class="item-type-badge" :class="s.type">{{ s.type === 'guided' ? '追踪' : '问答' }}</span>
+                  <span class="item-type-badge" :class="s.type">{{ s.type === 'guided' ? '追踪' : s.type === 'expert' ? '专家' : '问答' }}</span>
                   <el-button
                     class="item-rename"
                     text
@@ -97,6 +97,11 @@
               :class="{ active: repairMode === 'guided' }"
               @click="switchMode('guided')"
             >追踪维修</span>
+            <span
+              class="mode-tab"
+              :class="{ active: repairMode === 'expert' }"
+              @click="switchMode('expert')"
+            >专家模式</span>
           </div>
         </div>
       </div>
@@ -110,8 +115,8 @@
           <div class="welcome-icon">
             <el-icon :size="40" color="#0FC6C2"><ChatLineSquare /></el-icon>
           </div>
-          <h3>{{ repairMode === 'guided' ? '追踪维修模式' : '向 AI 助手提问' }}</h3>
-          <p>{{ repairMode === 'guided' ? '描述设备故障现象，AI 将逐步引导排查和维修' : '描述设备故障现象，AI 将检索知识库中的维修案例和解决方案' }}</p>
+          <h3>{{ repairMode === 'guided' ? '追踪维修模式' : repairMode === 'expert' ? '专家问答模式' : '向 AI 助手提问' }}</h3>
+          <p>{{ repairMode === 'guided' ? '描述设备故障现象，AI 将逐步引导排查和维修' : repairMode === 'expert' ? 'AI 将多轮智能检索知识库（自动改写查询、多路检索），基于高质量案例给出深入分析' : '描述设备故障现象，AI 将检索知识库中的维修案例和解决方案' }}</p>
           <div class="quick-hints">
             <span
               v-for="tag in quickTags"
@@ -151,6 +156,11 @@
                   </div>
                   <div class="msg-text" v-html="renderMarkdown(msg.content)"></div>
                   <template v-if="!msg._loading && !msg._thinking">
+                    <!-- 多故障提示：建议切专家模式 -->
+                    <div v-if="msg._suggestExpert && !sending" class="suggest-expert">
+                      <span class="suggest-text">检测到提问包含多个故障现象，专家模式会分故障逐一检索分析</span>
+                      <el-button class="suggest-btn" size="small" @click="switchToExpert(msg._question)">切换到专家模式</el-button>
+                    </div>
                     <!-- 匹配度标识 -->
                     <div v-if="msg.meta?.confidence" class="msg-confidence">
                       <span class="confidence-label">匹配度</span>
@@ -166,10 +176,16 @@
                       </div>
                       <div
                         v-for="item in msg.results"
-                        :key="item.knowledge_id"
+                        :key="(item.source_type || 'CASE') + '-' + item.knowledge_id"
                         class="source-chip"
                         @click="showSourceDetail(item)"
                       >
+                        <span
+                          class="chip-tag chip-source"
+                          :class="item.source_type === 'MANUAL' ? 'chip-source-manual' : 'chip-source-case'"
+                        >{{ item.source_type === 'MANUAL' ? '手册' : '案例' }}</span>
+                        <span class="chip-tag chip-fault" v-if="item.fault">{{ item.fault }}</span>
+                        <span class="chip-tag chip-err" v-if="item.error_code">{{ item.error_code }}</span>
                         <span class="chip-tag" v-if="item.device_type">{{ item.device_type }}</span>
                         <span class="chip-title">{{ item.title }}</span>
                         <span class="chip-score">{{ (item.score * 100).toFixed(0) }}%</span>
@@ -230,7 +246,7 @@
               v-model="inputText"
               type="textarea"
               :rows="1"
-              :placeholder="repairMode === 'guided' ? '请输入操作结果和设备状态...' : '请输入维修相关问题，规范的提问：产品型号+故障描述...'"
+              :placeholder="repairMode === 'guided' ? '请输入操作结果和设备状态...' : repairMode === 'expert' ? '描述模糊或复杂的维修问题，专家模式将多轮检索深度分析...' : '请输入维修相关问题，规范的提问：产品型号+故障描述...'"
               class="chat-textarea"
               @keydown.enter.prevent.exact="handleSend"
               resize="none"
@@ -251,9 +267,23 @@
     <el-dialog v-model="sourceDialog.visible" :title="sourceDialog.item?.title" width="680px" destroy-on-close>
       <template v-if="sourceDialog.item">
         <div class="source-detail-meta">
+          <el-tag
+            v-if="sourceDialog.item.source_type"
+            size="small"
+            :type="sourceDialog.item.source_type === 'MANUAL' ? 'warning' : 'primary'"
+            effect="plain"
+          >{{ sourceDialog.item.source_type === 'MANUAL' ? '手册' : '案例' }}</el-tag>
           <el-tag v-if="sourceDialog.item.device_type" size="small" type="success" effect="plain">{{ sourceDialog.item.device_type }}</el-tag>
+          <el-tag v-if="sourceDialog.item.error_code" size="small" type="danger" effect="plain">{{ sourceDialog.item.error_code }}</el-tag>
           <el-tag v-if="sourceDialog.item.fault_code" size="small" type="warning" effect="plain">{{ sourceDialog.item.fault_code }}</el-tag>
           <span class="source-detail-score">相关度 {{ (sourceDialog.item.score * 100).toFixed(0) }}%</span>
+        </div>
+        <!-- 手册出处：设备说明书/维修手册 + 章节 + 页码 -->
+        <div v-if="sourceDialog.item.source_type === 'MANUAL'" class="source-detail-cite">
+          <div class="cite-row"><span class="cite-label">手册</span>{{ sourceDialog.item.manual_name }}</div>
+          <div class="cite-row"><span class="cite-label">章节</span>{{ sourceDialog.item.chapter }}</div>
+          <div class="cite-row"><span class="cite-label">页码</span>{{ sourceDialog.item.page }}</div>
+          <div class="cite-row"><span class="cite-label">错误码</span>{{ sourceDialog.item.error_code }}</div>
         </div>
         <div class="source-detail-content">{{ sourceDialog.item.content }}</div>
         <div v-if="sourceDialog.item.fault_tags?.length" class="source-detail-tags">
@@ -394,11 +424,22 @@ const switchMode = (mode) => {
   guidedSessionId.value = ''
   if (mode === 'guided') {
     startNewGuidedChat()
+  } else if (mode === 'expert') {
+    if (!currentSession.value || currentSession.value.type !== 'expert') {
+      startNewExpertChat()
+    }
   } else {
-    if (!currentSession.value || currentSession.value.type === 'guided') {
+    if (!currentSession.value || currentSession.value.type === 'guided' || currentSession.value.type === 'expert') {
       startNewChat()
     }
   }
+}
+
+// 一键切换到专家模式并重新提问（问答模式检测到多故障时触发）
+const switchToExpert = (question) => {
+  repairMode.value = 'expert'
+  startNewExpertChat()
+  sendMessage(question || '')
 }
 
 const quickTags = [
@@ -536,6 +577,27 @@ const startNewGuidedChat = () => {
   saveSessions()
 }
 
+const startNewExpertChat = () => {
+  sessionIdCounter.value++
+  const id = `session_${sessionIdCounter.value}`
+  const now = new Date()
+  const session = {
+    id,
+    title: '专家问答',
+    preview: '',
+    time: formatTime(now),
+    _group: 'today',
+    _createdAt: now,
+    unread: false,
+    type: 'expert',
+    messages: [],
+  }
+  sessions.value.unshift(session)
+  activeSessionId.value = id
+  currentSession.value = session
+  saveSessions()
+}
+
 // ===== 切换会话 =====
 const startRename = (s) => {
   editingTitleId.value = s.id
@@ -656,6 +718,8 @@ const handleSend = async () => {
     content: '',
     results: [],
     meta: null,
+    _suggestExpert: false,
+    _question: text,
   })
   session.messages.push(aiMsg)
 
@@ -669,7 +733,9 @@ const handleSend = async () => {
   try {
     const url = isGuided
       ? '/api/v1/search/guided-repair/chat'
-      : '/api/v1/search/answer/stream'
+      : repairMode.value === 'expert'
+        ? '/api/v1/search/answer/expert'
+        : '/api/v1/search/answer/stream'
     const body = isGuided
       ? JSON.stringify({ message: text, session_id: guidedSessionId.value || undefined })
       : JSON.stringify({ question: text, top_k: 8 })
@@ -735,6 +801,8 @@ const handleSend = async () => {
               aiMsg._thinking = false
               aiMsg._loading = false
               aiMsg.content += data.content
+            } else if (data.type === 'suggest_expert') {
+              aiMsg._suggestExpert = true
             } else if (data.type === 'done') {
               aiMsg._thinking = false
               aiMsg._loading = false
@@ -907,6 +975,10 @@ const showSourceDetail = (item) => {
 .item-type-badge.guided {
   background: #D1F7F6;
   color: #0FC6C2;
+}
+.item-type-badge.expert {
+  background: #FFF3E8;
+  color: #FF7D00;
 }
 .item-title {
   font-size: 14px;
@@ -1116,6 +1188,36 @@ const showSourceDetail = (item) => {
   padding-top: 8px;
 }
 
+/* 多故障提示：建议切专家模式 */
+.suggest-expert {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 8px 12px;
+  background: #FFF3E8;
+  border: 1px solid #FFD8B5;
+  border-radius: 8px;
+}
+.suggest-text {
+  font-size: 12px;
+  color: #B25000;
+  line-height: 1.5;
+  flex: 1;
+}
+.suggest-btn {
+  background: #FF7D00 !important;
+  border-color: #FF7D00 !important;
+  color: #fff !important;
+  font-weight: 500;
+  flex-shrink: 0;
+}
+.suggest-btn:hover {
+  background: #E86F00 !important;
+  border-color: #E86F00 !important;
+}
+
 /* 匹配度 */
 .msg-confidence {
   display: flex;
@@ -1207,6 +1309,27 @@ const showSourceDetail = (item) => {
   border-radius: 4px;
   font-weight: 500;
   flex-shrink: 0;
+}
+.chip-fault {
+  background: #FFF3E8;
+  color: #FF7D00;
+}
+/* 来源类型徽标：手册=橙色，案例=蓝色 */
+.chip-source-manual {
+  background: #FFF3E8;
+  color: #FF7D00;
+  border: 1px solid #FFD8B5;
+}
+.chip-source-case {
+  background: var(--color-primary-light);
+  color: var(--color-primary);
+  border: 1px solid var(--color-primary-light);
+}
+/* 错误码 chip */
+.chip-err {
+  background: #FFF0F0;
+  color: #F56C6C;
+  font-weight: 600;
 }
 .chip-title {
   flex: 1;
@@ -1353,6 +1476,28 @@ const showSourceDetail = (item) => {
   margin-top: 16px;
   display: flex;
   gap: 6px;
+}
+/* 手册出处区块 */
+.source-detail-cite {
+  margin-bottom: 16px;
+  padding: 10px 14px;
+  background: #FFF3E8;
+  border: 1px solid #FFD8B5;
+  border-radius: 8px;
+  font-size: 13px;
+  color: #B25000;
+}
+.cite-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  line-height: 1.9;
+}
+.cite-label {
+  flex-shrink: 0;
+  width: 48px;
+  font-weight: 600;
+  color: #FF7D00;
 }
 
 /* ===== 追踪维修模式 ===== */

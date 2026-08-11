@@ -16,11 +16,11 @@
 ```
 d:\Smart-Repair-System
 ├── docker-compose.yml      # 基础设施编排（PostgreSQL / Redis / Milvus / etcd / MinIO）
+├── requirements.txt        # Python 依赖清单（唯一权威版本）
 ├── backend/                # FastAPI 后端（Python 3.x）
 │   ├── app/                # 业务代码（api / agents / core / models）
 │   ├── alembic/            # 数据库迁移
 │   ├── scripts/            # 种子数据脚本（seed_*.py）
-│   ├── requirements.txt    # Python 依赖
 │   ├── .env                # 环境配置（勿提交到 Git）
 │   ├── .env.example        # 配置模板（可提交）
 │   └── start_backend.ps1   # 一键启动后端
@@ -31,13 +31,13 @@ d:\Smart-Repair-System
 
 | 服务 | 容器/进程 | 本机端口 | 说明 |
 |---|---|---|---|
-| PostgreSQL | maintenance_postgres | 5432 | 关系数据（用户/工单/知识元数据） |
+| PostgreSQL | maintenance_postgres | 15432 | 关系数据（用户/工单/知识元数据） |
 | Redis | maintenance_redis | **7379** | 缓存 + 会话（注意不是 6379） |
 | Milvus | maintenance_milvus | 19530 / 9091 | 向量库（语义检索） |
 | etcd | maintenance_etcd | 2379 | Milvus 元数据 |
 | MinIO | maintenance_minio | 9000 / 9001 | 对象存储（Milvus 依赖） |
-| 后端 API | uvicorn（本机进程） | 8000 | FastAPI，**必须 127.0.0.1** |
-| 前端 | vite（本机进程） | 5173 | 开发服务器，代理 /api → 8000 |
+| 后端 API | uvicorn（本机进程） | 18080 | FastAPI（注意：8000 曾多次被 Hyper-V/WSL 保留段占用，已统一迁移到 18080） |
+| 前端 | vite（本机进程） | 4173 | 开发服务器，代理 /api → 18080（3000 也曾被保留段占用，见 五、常见问题） |
 
 ---
 
@@ -128,7 +128,7 @@ docker-compose ps                # 确认 5 个容器都 Up
 cd backend
 python -m venv .venv
 .venv\Scripts\Activate.ps1       # 激活虚拟环境（PowerShell）
-pip install -r requirements.txt  # 安装依赖
+pip install -r ..\requirements.txt  # 安装依赖（清单在项目根目录）
 
 # ③ 环境配置：把 backend\.env.example 复制一份为 backend\.env
 #    并填入你的 DeepSeek / 钉钉等真实密钥（当前项目已有 .env，此步可跳过）
@@ -147,31 +147,44 @@ python scripts\seed_data.py           # 基础数据（用户/设备/备件等�
 python sync_vectors.py
 # 预期输出：✅ 向量同步完成！ 成功: N
 
-# ⑦ 启动后端
+# ⑦ 启动后端（端口 18080，见下方"端口冲突修复"）
 # 方式 A（推荐，脚本里已带正确参数）：
 powershell -ExecutionPolicy Bypass -File start_backend.ps1
 # 方式 B（等价手写命令）：
-uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+uvicorn app.main:app --host 0.0.0.0 --port 18080
 
-# ⑧ 另开一个终端启动前端
+# ⑧ 另开一个终端启动前端（端口 4173）
 cd "d:\Smart-Repair-System\frontend"
 npm install          # 首次安装依赖（node_modules）
-npm run dev          # 启动开发服务器
+npm run dev          # 启动开发服务器（端口在 vite.config.js 里配置为 4173）
 ```
 
-> ⚠️ Windows 硬性要求：后端必须 `--host 127.0.0.1`，**不要用 0.0.0.0**（Windows 下会绑定失败）。
+> ⚠️ **端口说明（重要）**：本项目后端统一用 **18080**、前端 **4173**。
+> 原来的 8000 / 3000 多次被 **Hyper-V/WSL 动态保留端口段**圈走（每次开机随机分配一段端口，被圈走的端口任何程序都绑不上，报 `WinError 10013`），所以已全部迁移。若再遇到端口被占/绑定失败，见 **五、常见问题排查 → 端口冲突**。
 
 ### 3.2 日常启动（正常使用）
+
+**推荐方式：一键启动脚本**（自动检查端口冲突 → 拉起 Docker → 启动前后端）：
+
+```powershell
+# ① 先打开 Docker Desktop
+# ② 双击 / 运行项目根目录的一键启动脚本
+cd "d:\Smart-Repair-System"
+.\start_all.ps1
+```
+
+脚本会自动完成：端口体检（冲突时弹 UAC 自动调用 fix_winnat_ports.ps1 修复）→ `docker compose up -d` → 后台启动后端(18080) + 前端(4173)，日志写在项目根目录 `backend.log` / `frontend.log`。
+
+**手动方式（等价）：**
 
 ```powershell
 # 终端 1：启动基础设施
 cd "d:\Smart-Repair-System"
-docker-compose up -d
+docker compose up -d
 
 # 终端 2：启动后端
 cd "d:\Smart-Repair-System\backend"
-.venv\Scripts\Activate.ps1
-uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+uvicorn app.main:app --host 0.0.0.0 --port 18080
 
 # 终端 3：启动前端
 cd "d:\Smart-Repair-System\frontend"
@@ -179,9 +192,9 @@ npm run dev
 ```
 
 浏览器访问：
-- 前端页面：http://127.0.0.1:5173
-- 后端接口文档（Swagger）：http://127.0.0.1:8000/docs
-- 健康检查：http://127.0.0.1:8000/api/v1/health
+- 前端页面：http://127.0.0.1:4173
+- 后端接口文档（Swagger）：http://127.0.0.1:18080/docs
+- 健康检查：http://127.0.0.1:18080/api/v1/health
 
 ### 3.3 常用维护操作
 
@@ -322,17 +335,70 @@ git branch -d feature/xxx
 | 不要提交 `.venv/`、`node_modules/` | 体积大且可重建，已被 .gitignore 排除 |
 | commit 前先 `git status` | 检查是否有敏感文件混入 |
 
+### 4.7 提交与推送实战
+
+**① 查看暂存区（缓存区）**
+
+```powershell
+git status                    # 哪些文件已暂存 / 未暂存
+git diff --cached --stat      # 暂存区改动摘要（文件级别）
+git diff --cached             # 暂存区完整改动内容
+git diff                      # 未暂存的改动内容
+```
+
+**② 提交指定文件 / 所有文件**
+
+```powershell
+# 只提交指定文件：先把不提交的移出暂存区，再提交剩余文件
+git restore --staged <文件>
+git commit -m "说明"
+
+# 或全部取消暂存后，再精确暂存要提交的
+git restore --staged .
+git add backend/app/main.py
+git commit -m "只提交 main.py"
+
+# 提交所有改动（含新增文件）
+git add .
+git commit -m "说明"
+```
+
+> 注意：`git commit -am "说明"` 只能提交**已跟踪**文件的修改，新增文件必须先 `git add`。
+
+**③ 查看修改与提交记录**
+
+```powershell
+git status                   # 当前未提交的修改
+git log --oneline            # 简洁提交历史
+git log --stat -5            # 最近 5 次提交改了哪些文件
+git show <提交ID> --stat      # 某次提交改了哪些文件
+```
+
+**④ 推送被拒（fetch first）处理**
+
+远程有新提交、本地没有时，`git push` 会报 `! [rejected] (fetch first)`。这是 git 的保护机制——它只接受接在**远程最新提交**后面的历史，防止顶掉别人/其他机器的提交。解决办法：**先拉取、再推送**。
+
+```powershell
+git pull --rebase origin master   # ① 先拉取远程更新（rebase 历史更整洁）
+git push origin master            # ② 再推送
+```
+
+- 不想用 rebase 也可用 `git pull origin master`（会多产生一个合并提交）
+- 若出现冲突（conflict）提示，先解决冲突再继续，不要硬操作
+
 ---
 
 ## 五、常见问题排查速查表
 
 | 现象 | 排查步骤 |
 |---|---|
-| 后端启动报数据库连接失败 | `docker-compose ps` 看 postgres 是否 healthy；`docker-compose logs postgres` |
-| Milvus 连接失败 | 同上，先看 `docker-compose ps`；再 `docker exec -it maintenance_milvus bash` 确认进程 |
+| 后端启动报数据库连接失败 | `docker compose ps` 看 postgres 是否 healthy；`docker compose logs postgres` |
+| Milvus 连接失败 | 同上，先看 `docker compose ps`；再 `docker exec -it maintenance_milvus bash` 确认进程 |
 | Redis 连不上 | 检查 .env 里 REDIS_PORT=**7379**（compose 映射 7379→容器内 6379） |
-| 前端接口 404 / 502 | 确认后端 8000 已启动；确认 vite 代理指向 127.0.0.1:8000 |
+| 前端接口 404 / 502 | 确认后端 **18080** 已启动；确认 vite 代理指向 127.0.0.1:18080 |
+| **端口绑定失败 `WinError 10013`（端口被 Hyper-V/WSL 保留段圈走）** | 运行 `netsh interface ipv4 show excludedportrange protocol=tcp` 看端口是否在保留段内；然后右键管理员运行 `.\fix_winnat_ports.ps1` 把 WinNAT 动态端口固定到 50000+（一劳永逸），或直接运行 `.\start_all.ps1` 自动修复 |
 | GitHub push 超时 | 设置 Clash 代理后重试（见 4.2） |
-| 改了代码不生效 | 后端确认带 `--reload`；前端 vite 热更新需页面刷新 |
+| 改了代码不生效 | 后端确认已重启；前端 vite 热更新需页面刷新 |
 | 数据库表结构对不上 | `alembic upgrade head` 执行最新迁移 |
 | 检索不到新知识 | 新增知识后执行 `python sync_vectors.py` 同步向量 |
+| 钉钉扫码 404 | 电脑重启后 cpolar 域名会变，需同步更新 `backend/.env` 的 `DINGTALK_REDIRECT_URI` / `SERVER_PUBLIC_URL` 和钉钉后台「登录回调地址」（cpolar 转发目标固定为 localhost:18080） |

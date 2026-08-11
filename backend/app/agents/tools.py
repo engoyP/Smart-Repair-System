@@ -388,14 +388,20 @@ def weighted_rerank(
         title = item.get("title", "")
         content = item.get("content", "")
         combined = title + " " + content
+        # 手册错误码条目：正文不含错误码本身，把 error_code 纳入命中匹配，
+        # 否则"SV0436"这类错误码提问无法命中手册条目（会被压到 0.15 地板）
+        if item.get("error_code"):
+            combined += " " + str(item.get("error_code"))
 
         # 计算条目命中查询中故障信号词的数量
         fault_hit_count = sum(1 for kw in fault_kw if kw in combined)
         fault_ratio = fault_hit_count / len(fault_kw) if fault_kw else 0
 
         # 设备类型匹配度（前提条件：不匹配直接压到低分）
+        # 提问未提取到设备词（device_kw 为空）时不做设备惩罚——如错误码提问"机械臂报6401"
+        # 提取不到白名单设备词，此时不能把手册条目误判为"设备不匹配"
         device_type = item.get("device_type", "")
-        device_match = any(kw in device_type for kw in device_kw)
+        device_match = any(kw in device_type for kw in device_kw) if device_kw else True
 
         original_score = item.get("score", 0)
         if original_score <= 0:
@@ -426,6 +432,43 @@ def weighted_rerank(
 _RRF_ALERTED_METHODS: set = set()
 
 
+# ==================== 错误码提取（设备日志/报警码） ====================
+
+# 错误码形态：SV0436 / ALM-6401 / E3091 / R0910 / PS0002 / EX1006
+_ERROR_CODE_RE = re.compile(r'[A-Za-z]{1,6}[-\s]?\d{2,6}')
+
+
+def extract_error_codes(query: str) -> List[str]:
+    """从提问中提取错误码/报警码（如 SV0436 / ALM-6401 / E3091 / 6401）
+
+    规则：
+    - 字母+数字混合 token（SV0436 / ALM-6401 / E3091 / R0910 / PS0002）
+      → 去分隔符 + 转大写归一化（"ALM-6401" → "ALM6401"）
+    - 纯数字 4~6 位（6401 / 0401）→ 可能是报警码，排除年份（19xx / 20xx）
+
+    Returns:
+        归一化后的错误码列表（可能为空）
+    """
+    codes = set()
+    if not query:
+        return []
+
+    # 1. 字母+数字混合错误码
+    for m in _ERROR_CODE_RE.finditer(query):
+        tok = re.sub(r'[\s-]', '', m.group(0)).upper()
+        if len(tok) >= 3 and not tok.isdigit():
+            codes.add(tok)
+
+    # 2. 纯数字 4~6 位报警码（排除年份）
+    for m in re.finditer(r'\d{4,6}', query):
+        tok = m.group(0)
+        if len(tok) == 4 and tok.startswith(('19', '20')):
+            continue
+        codes.add(tok)
+
+    return sorted(codes)
+
+
 def rrf_merge(
     result_sets: List[List[Dict]],
     k: int = 60,
@@ -435,12 +478,15 @@ def rrf_merge(
     Reciprocal Rank Fusion - 融合多个检索结果集
 
     去重键说明（重要）：
-    - 优先使用 knowledge_id（知识库主键，跨检索路稳定）；
+    - 优先使用 `_dedup_key`（跨库复合键，如手册条目 "M:12"、知识条目 "K:3"）；
+      多库融合（知识库 knowledge + 手册库 log_code）时两者主键都是 PG 自增 int，
+      必须用 `_dedup_key` 区分，否则手册条目与知识条目会互相合并/去重错误。
+    - 其次使用 knowledge_id（知识库主键，跨检索路稳定）；
     - 向量路的 id 是 Milvus point_id（uuid 字符串），BM25 路的 id 是数据库 id（整数），
       若用 id 做合并键，同一知识会因两路 id 不同被当成两条，导致双路命中的
       RRF 分数不合并（该知识本应得到 1/(k+rank1)+1/(k+rank2)）。
-    - 因此统一以 knowledge_id 为合并键；若发现某路结果 id 与 knowledge_id 不一致，
-      会打一条 WARNING 告警（每路仅一次），提示后续新增检索路时必须携带 knowledge_id。
+    - 因此统一以 `_dedup_key` > `knowledge_id` > `id` 为合并键；若发现某路结果
+      id 与 knowledge_id 不一致，会打一条 WARNING 告警（每路仅一次）。
 
     Args:
         result_sets: 多个检索结果列表
@@ -452,12 +498,13 @@ def rrf_merge(
     """
     scores = {}
 
-    for result_set in result_sets:
+    for result_set in result_sets:   # 第1轮外层 = 向量路，第2轮外层 = BM25路
+        
         for rank, item in enumerate(result_set, start=1):
-            # 统一去重键：优先稳定的 knowledge_id，兜底用 id
+            # 统一去重键：跨库复合键(_dedup_key) > knowledge_id > id
             raw_id = item.get("id")
             kid = item.get("knowledge_id")
-            item_id = kid or raw_id
+            item_id = item.get("_dedup_key") or kid or raw_id
             if item_id is None:
                 continue
 
@@ -475,10 +522,16 @@ def rrf_merge(
 
             rrf_score = 1.0 / (k + rank)
             if item_id not in scores:
-                scores[item_id] = {"rrf": 0.0, "vector_score": 0.0, "item": item}
+                scores[item_id] = {
+                    "rrf": 0.0, 
+                    "vector_score": 0.0, 
+                    "item": item
+                    }
             scores[item_id]["rrf"] += rrf_score
-            # 只记录向量检索的余弦相似度作为显示分数
-            if item.get("method") == "vector_search":
+
+            # 记录语义检索/精确匹配的相似度作为显示分数
+            # （BM25 关键词匹配无法衡量语义相关性，不计入 → BM25 独中条目得 0 分）
+            if item.get("method") != "bm25_search":
                 item_sim = item.get("score", 0)
                 if item_sim > scores[item_id]["vector_score"]:
                     scores[item_id]["vector_score"] = item_sim
@@ -506,7 +559,7 @@ def rrf_merge(
     seen: set = set()
     unique: List[Dict] = []
     for item in result:
-        key = item.get("knowledge_id") or item.get("id")
+        key = item.get("_dedup_key") or item.get("knowledge_id") or item.get("id")
         if key is None or key in seen:
             continue
         seen.add(key)
@@ -721,6 +774,111 @@ class RetrievalTools:
                 logger.error(f"BM25 降级检索也失败: {e2}")
                 return ToolResult(success=False, data=[], error=str(e2))
 
+    # ---------- Tool 2.5: 设备手册错误码检索（log_code 库，双路） ----------
+
+    def manual_code_search(
+        self,
+        error_codes: List[str],
+        device_type: Optional[str] = None,
+        top_k: int = 5,
+    ) -> ToolResult:
+        """错误码精确匹配（最高优先级）——按错误码在手册表（manual_code_entries）精确查找
+
+        Args:
+            error_codes: 从提问中提取的错误码列表（如 ["SV0436"]）
+            device_type: 可选，设备类型过滤
+            top_k: 返回结果数
+
+        Returns:
+            命中条目标记为 score=1.0，带 _dedup_key="M:{id}" 供跨库 RRF 融合去重
+        """
+        if not error_codes:
+            return ToolResult(success=True, data=[], metadata={"method": "manual_code_exact", "count": 0})
+        try:
+            from app.models.manual_code import ManualCodeEntry
+            db = self.db_factory()
+            try:
+                q = db.query(ManualCodeEntry).filter(ManualCodeEntry.error_code.in_(error_codes))
+                if device_type:
+                    q = q.filter(ManualCodeEntry.device_type == device_type)
+                rows = q.order_by(ManualCodeEntry.id.asc()).limit(top_k).all()
+
+                items = []
+                for row in rows:
+                    content_parts = [row.description or ""]
+                    if row.causes:
+                        content_parts.append(f"原因：{row.causes}")
+                    if row.solutions:
+                        content_parts.append(f"处理：{row.solutions}")
+                    items.append({
+                        "_dedup_key": f"M:{row.id}",   # 跨库复合键（与知识条目 K: 区分）
+                        "id": f"manual-{row.id}",      # 展示用 id
+                        "manual_code_id": row.id,
+                        "error_code": row.error_code,
+                        "title": row.title,
+                        "content": "\n".join(content_parts),
+                        "description": row.description or "",
+                        "causes": row.causes or "",
+                        "solutions": row.solutions or "",
+                        "manual_name": row.manual_name,
+                        "device_type": row.device_type or "",
+                        "chapter": row.chapter or "",
+                        "page": row.page or "",
+                        "score": 1.0,                  # 精确匹配给满分（作为显示分）
+                        "method": "manual_code_exact",
+                    })
+                return ToolResult(
+                    success=True,
+                    data=items,
+                    metadata={"method": "manual_code_exact", "count": len(items)},
+                )
+            finally:
+                db.close()
+        except Exception as e:
+            logger.error(f"手册错误码精确匹配失败: {e}")
+            return ToolResult(success=False, data=[], error=str(e))
+
+    def manual_vector_search(
+        self,
+        query: str,
+        top_k: int = 10,
+        device_type: Optional[str] = None,
+        score_threshold: float = 0.0,
+    ) -> ToolResult:
+        """手册错误码语义检索——对提问文本编码后向量搜索 log_code 集合
+
+        Args:
+            query: 用户提问（自然语言，如"主轴过流报警"）
+            top_k: 返回结果数
+            device_type: 可选，设备类型过滤
+            score_threshold: 相似度阈值
+
+        Returns:
+            结果带 _dedup_key="M:{id}" 供跨库 RRF 融合去重
+        """
+        try:
+            from app.core.vector_store import log_code_store
+            cleaned = self.query_extractor.extract(query) or query
+            query_vector = self.encode(cleaned)
+            results = log_code_store.search(
+                query_vector=query_vector,
+                limit=top_k,
+                device_type=device_type,
+                score_threshold=score_threshold,
+            )
+            for r in results:
+                r["_dedup_key"] = f"M:{r.get('manual_code_id')}"
+                r["content"] = r.get("description", "")
+                r["method"] = "manual_vector_search"
+            return ToolResult(
+                success=True,
+                data=results,
+                metadata={"method": "manual_vector_search", "count": len(results)},
+            )
+        except Exception as e:
+            logger.error(f"手册错误码语义检索失败: {e}")
+            return ToolResult(success=False, data=[], error=str(e))
+
     # ---------- Tool 3: 条件精确查询 ----------
 
     def conditional_query(
@@ -818,6 +976,8 @@ class RetrievalTools:
                 model=settings.DEEPSEEK_MODEL,
                 temperature=0.3,
                 streaming=False,
+                timeout=30,            # 查询改写超时 30s，超时降级为原查询
+                max_retries=1,
             )
 
             system_prompt = f"""你是一个{context}的查询优化助手。

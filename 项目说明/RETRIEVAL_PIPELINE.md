@@ -49,6 +49,8 @@
 | 融合（3-4） | 统一多路分数、清掉噪音 | 分数不可比、假命中 |
 | 精排（5-6） | 按真实相关度定胜负 | 排名太粗糙 |
 
+> 注：问答（`/answer/stream`）与专家（`/answer/expert`）在 [5] 加权重排后，还叠加"设备类型精确匹配 + 故障关键词命中"严格过滤（`_filter_rerank_cases`），剔除跨设备/泛相似案例；专家模式多故障时各子查询并行走完整链路，再按故障分组回答。详见第 4 节。
+
 ---
 
 ## 1. 查询关键词提取（QueryExtractor）
@@ -265,6 +267,16 @@ kept = [m for m in merged
 - 用"向量语义认可"作为硬门槛，把关键词撞车的假命中挡在门外
 - 全链路四道防线之一（RRF 清零 → 此处过滤 → 重排压分 → Top3 截断）
 
+**问答/专家模式的额外严格过滤（`_filter_rerank_cases`）**
+
+`/answer/stream` 与 `/answer/expert` 在通用过滤之上，还叠加一层"设备 + 故障关键词"严格过滤（[search.py](../backend/app/api/search.py)）：
+
+1. 用 `query_extractor` 白名单从提问提取设备类型（`_DEVICE_TYPE_TERMS` 最长词优先匹配）和故障关键词（剔除设备词后的技术词）
+2. 案例必须**设备类型精确匹配**且**标题/正文至少命中一个故障关键词**，否则剔除
+3. 严格过滤为空时回退宽松过滤的 top2（防止误伤导致"未检索到"）
+
+作用：剔除跨设备案例（如"数控机床主轴过热"误召回"输送设备电机过热"）和同设备泛相似案例（如"黑屏"），根治多故障提问的串味问题。
+
 ---
 
 ## 5. 加权重排（Weighted Rerank）
@@ -355,7 +367,9 @@ kept = [m for m in merged
 |---|---|---|---|---|
 | 追踪维修 `_search_knowledge` | **3 条** | `merged[:3]`（guided_repair_agent.py:201） | Top3 注入 LLM 生成下一步排查 | 对话式引导只需最相关的几条，多了干扰 LLM 判断 |
 | 钉钉知识检索 `search_knowledge` | **5 条** | `[:5]`（mcp/tools.py:105） | Top5 交给 AnswerAgent 生成回答 | 回答要综合参考，稍多几条 |
-| 问答/搜索端点（/answer、/search、/agent） | **top_k 条**（前端默认 8） | `rrf_merge(top_n=request.top_k)`，不额外截断 | 展示给用户浏览的案例列表 | 用户要浏览多条 |
+| 问答 `/answer/stream` | **最多 8 条** | `_filter_rerank_cases`：严格过滤（设备+故障关键词）后截前 8 | 注入 LLM + 用户浏览 | 供 LLM 参考要少而精，且剔除串味案例 |
+| 专家 `/answer/expert` | **每故障 ≤8 条** | 各子查询走 `_filter_rerank_cases`，跨故障全局按分数降序取 8 | 分组回答 + 用户浏览 | 多故障分组检索，展示时全局降序 |
+| 搜索页（/search、/agent） | **top_k 条**（前端默认 8） | `rrf_merge(top_n=request.top_k)`，不额外截断 | 展示给用户浏览的案例列表 | 用户要浏览多条 |
 
 - 重排后取前 3，content 截断 600 字
 - 作为"知识库参考（唯一知识来源）"注入 Prompt

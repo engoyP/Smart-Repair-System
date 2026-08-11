@@ -63,6 +63,8 @@ class QueryKeywordExtractor:
                 model=settings.DEEPSEEK_MODEL,
                 temperature=0.1,
                 streaming=False,
+                timeout=15,            # 关键词提取兜底调用，超时直接返回原始查询
+                max_retries=1,
             )
         return self._llm
 
