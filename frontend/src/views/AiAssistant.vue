@@ -106,6 +106,33 @@
         </div>
       </div>
 
+      <!-- ===== 三种模式介绍（从维修人员角度选择） ===== -->
+      <div class="mode-intro">
+        <div class="mode-intro-title">
+          <span class="mi-label">三种模式怎么选？</span>
+          <span class="mi-tip">点击卡片查看适用场景，再点一次可切换模式</span>
+        </div>
+        <div class="mode-intro-cards">
+          <div
+            v-for="card in modeIntroCards"
+            :key="card.mode"
+            class="mode-intro-card"
+            :class="{ active: repairMode === card.mode }"
+            @click="switchMode(card.mode)"
+          >
+            <div class="mi-card-head">
+              <div class="mi-icon" :style="{ background: card.color }">
+                <el-icon :size="16" color="#fff"><component :is="card.icon" /></el-icon>
+              </div>
+              <span class="mi-name">{{ card.name }}</span>
+            </div>
+            <div class="mi-when"><span class="mi-when-label">适合</span>{{ card.when }}</div>
+            <div class="mi-example"><span class="mi-example-label">例如</span>{{ card.example }}</div>
+            <div class="mi-desc">{{ card.desc }}</div>
+          </div>
+        </div>
+      </div>
+
       <!-- ===== 聊天内容区（问答/追踪共用） ===== -->
 
       <!-- 聊天内容区 -->
@@ -300,7 +327,7 @@
 import { ref, computed, reactive, nextTick, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
-  Plus, Search, Delete, Edit, Document, Message, Promotion, ChatLineSquare
+  Plus, Search, Delete, Edit, Document, Message, Promotion, ChatLineSquare, Compass, Tools
 } from '@element-plus/icons-vue'
 import request from '../api'
 
@@ -330,6 +357,37 @@ const sourceDialog = reactive({ visible: false, item: null })
 // ===== 追踪模式 =====
 const repairMode = ref('qa')
 const guidedSessionId = ref('')  // 后端追踪会话 ID
+
+// ===== 三种模式介绍（维修人员视角） =====
+const modeIntroCards = [
+  {
+    mode: 'qa',
+    name: '智能问答',
+    icon: ChatLineSquare,
+    color: '#0FC6C2',
+    when: '单个故障、问题描述得清，想快速知道"以前怎么处理的"',
+    example: '"3号注塑机锁模力不够怎么办？"',
+    desc: 'AI 检索历史案例，几秒给出「问题分析 → 可能原因 → 排查方向 → 处理方案 → 预防建议」五段式回答。一次问一个故障最快。',
+  },
+  {
+    mode: 'guided',
+    name: '追踪维修',
+    icon: Compass,
+    color: '#FF7D00',
+    when: '故障复杂、说不出原因，或新人需要老师傅手把手带着查',
+    example: '"注塑机报 E3091，帮我一步步查"',
+    desc: 'AI 像老师傅一样逐步引导排查：每步给出操作建议和判断标准，你反馈结果后继续下一步，直到定位原因。',
+  },
+  {
+    mode: 'expert',
+    name: '专家模式',
+    icon: Tools,
+    color: '#3370FF',
+    when: '一台设备同时出现多个故障，想一次性问清楚',
+    example: '"锁模力不够出飞边，油温65度报警，熔胶马达不转，三个一起查"',
+    desc: 'AI 把复合问题拆成多个单故障，分别检索各自的历史案例、按故障分组回答，互不干扰、不串味。',
+  },
+]
 
 const editingTitleId = ref(null)
 const editingTitleValue = ref('')
@@ -1511,4 +1569,99 @@ const showSourceDetail = (item) => {
 }
 .mode-tab:hover { color: #4E5969; }
 .mode-tab.active { background: #fff; color: #0FC6C2; box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
+
+/* ===== 三种模式介绍 ===== */
+.mode-intro {
+  padding: 12px 24px 0;
+  flex-shrink: 0;
+}
+.mode-intro-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.mi-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+.mi-tip {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+.mode-intro-cards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+.mode-intro-card {
+  background: #fff;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  cursor: pointer;
+  transition: all .2s;
+}
+.mode-intro-card:hover {
+  border-color: #0FC6C2;
+  box-shadow: 0 2px 8px rgba(15, 198, 194, 0.12);
+}
+.mode-intro-card.active {
+  border-color: #0FC6C2;
+  background: rgba(15, 198, 194, 0.04);
+}
+.mi-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.mi-icon {
+  width: 28px; height: 28px;
+  border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.mi-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+.mi-when,
+.mi-example {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  line-height: 1.6;
+  margin-bottom: 2px;
+}
+.mi-when-label,
+.mi-example-label {
+  display: inline-block;
+  font-size: 11px;
+  padding: 0 4px;
+  border-radius: 3px;
+  margin-right: 4px;
+  line-height: 16px;
+}
+.mi-when-label {
+  background: rgba(15, 198, 194, 0.1);
+  color: #0FC6C2;
+}
+.mi-example-label {
+  background: rgba(255, 125, 0, 0.1);
+  color: #FF7D00;
+}
+.mi-example {
+  color: #3370FF;
+  font-style: italic;
+}
+.mi-desc {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  line-height: 1.6;
+  margin-top: 4px;
+  border-top: 1px dashed var(--color-border);
+  padding-top: 6px;
+}
 </style>

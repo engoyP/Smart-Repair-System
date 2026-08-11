@@ -82,6 +82,23 @@
               <span>AI 智能助手</span>
             </div>
           </template>
+          <!-- 三种 AI 模式说明 -->
+          <div class="ai-mode-intro">
+            <div class="ai-mode-title">AI 助手的三种模式怎么选？</div>
+            <div class="ai-mode-cards">
+              <div v-for="card in modeHelpCards" :key="card.name" class="ai-mode-card">
+                <div class="am-card-head">
+                  <div class="am-icon" :style="{ background: card.color }">
+                    <el-icon :size="16" color="#fff"><component :is="card.icon" /></el-icon>
+                  </div>
+                  <span class="am-name">{{ card.name }}</span>
+                </div>
+                <div class="am-when"><span class="am-when-label">适合</span>{{ card.when }}</div>
+                <div class="am-example"><span class="am-example-label">例如</span>{{ card.example }}</div>
+                <div class="am-desc">{{ card.desc }}</div>
+              </div>
+            </div>
+          </div>
           <el-collapse accordion>
             <template v-for="item in aiFAQ" :key="item.q">
               <el-collapse-item :title="item.q">
@@ -201,6 +218,34 @@ const deviceFAQ = [
   },
 ]
 
+// 三种 AI 模式说明（与 AI 问答页保持一致）
+const modeHelpCards = [
+  {
+    name: '智能问答',
+    icon: 'ChatLineSquare',
+    color: '#0FC6C2',
+    when: '单个故障、问题描述得清，想快速知道"以前怎么处理的"',
+    example: '"3号注塑机锁模力不够怎么办？"',
+    desc: 'AI 检索历史案例，几秒给出「问题分析 → 可能原因 → 排查方向 → 处理方案 → 预防建议」五段式回答。一次问一个故障最快。',
+  },
+  {
+    name: '追踪维修',
+    icon: 'Compass',
+    color: '#FF7D00',
+    when: '故障复杂、说不出原因，或新人需要老师傅手把手带着查',
+    example: '"注塑机报 E3091，帮我一步步查"',
+    desc: 'AI 像老师傅一样逐步引导排查：每步给出操作建议和判断标准，你反馈结果后继续下一步，直到定位原因。',
+  },
+  {
+    name: '专家模式',
+    icon: 'Tools',
+    color: '#3370FF',
+    when: '一台设备同时出现多个故障，想一次性问清楚',
+    example: '"锁模力不够出飞边，油温65度报警，熔胶马达不转，三个一起查"',
+    desc: 'AI 把复合问题拆成多个单故障，分别检索各自的历史案例、按故障分组回答，互不干扰、不串味。',
+  },
+]
+
 const aiFAQ = [
   {
     q: 'AI 分析故障功能如何使用？',
@@ -212,7 +257,7 @@ const aiFAQ = [
   },
   {
     q: 'AI 问答看板怎么使用？',
-    a: '进入<b>AI 问答看板</b>，你可切换<b>"问答模式"</b>自由提问或<b>"追踪维修"</b>模式逐步排查故障。AI 会从知识库检索相关案例并给出参考建议。',
+    a: '进入<b>AI 问答看板</b>，有三种模式可选：<b>"问答模式"</b>适合单个故障快速查经验，<b>"追踪维修"</b>适合复杂故障一步步排查，<b>"专家模式"</b>适合多个故障一起问、分故障逐一分析。AI 会从知识库检索相关案例并给出参考建议。',
   },
 ]
 
@@ -352,5 +397,80 @@ const accountFAQ = [
   font-size: 14px;
   color: #1D2129;
   font-weight: 500;
+}
+
+/* ===== 三种 AI 模式说明 ===== */
+.ai-mode-intro {
+  padding: 0 16px 16px;
+}
+.ai-mode-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1D2129;
+  margin-bottom: 10px;
+}
+.ai-mode-cards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+.ai-mode-card {
+  background: #F7F8FA;
+  border: 1px solid #E5E6EB;
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+.am-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.am-icon {
+  width: 28px; height: 28px;
+  border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.am-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1D2129;
+}
+.am-when,
+.am-example {
+  font-size: 12px;
+  color: #4E5969;
+  line-height: 1.6;
+  margin-bottom: 2px;
+}
+.am-when-label,
+.am-example-label {
+  display: inline-block;
+  font-size: 11px;
+  padding: 0 4px;
+  border-radius: 3px;
+  margin-right: 4px;
+  line-height: 16px;
+}
+.am-when-label {
+  background: rgba(15, 198, 194, 0.12);
+  color: #0FC6C2;
+}
+.am-example-label {
+  background: rgba(255, 125, 0, 0.12);
+  color: #FF7D00;
+}
+.am-example {
+  color: #3370FF;
+  font-style: italic;
+}
+.am-desc {
+  font-size: 12px;
+  color: #4E5969;
+  line-height: 1.6;
+  margin-top: 4px;
+  border-top: 1px dashed #E5E6EB;
+  padding-top: 6px;
 }
 </style>
