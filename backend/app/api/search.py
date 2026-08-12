@@ -20,6 +20,7 @@ from app.agents.retrieval_agent import RetrievalAssistantAgent
 from app.agents.answer_agent import answer_agent
 from app.agents.fault_decomposer import fault_decomposer
 from app.agents.guided_repair_agent import guided_repair_agent
+from app.agents.expert_repair_agent import expert_repair_agent, ExpertOption, ExpertStepResult
 
 router = APIRouter()
 
@@ -68,6 +69,14 @@ class AnswerRequest(BaseModel):
     device_type: Optional[str] = Field(None, description="设备类型筛选")  # 可选，缩小检索范围
     fault_code: Optional[str] = Field(None, description="故障码筛选")    # 可选，缩小检索范围
     top_k: Optional[int] = Field(10, ge=3, le=20)   # 检索案例数：默认10，限制3~20（至少3条供LLM参考）
+    session_id: Optional[str] = Field(None, description="专家模式会话ID（多轮引导时带上前一轮返回的 session_id）")
+
+
+class ExpertStepRequest(BaseModel):
+    """专家模式后续引导轮请求：带会话ID + 用户反馈"""
+    session_id: str = Field(..., min_length=1, max_length=64, description="专家模式会话ID（首轮 done 事件返回）")
+    message: str = Field(..., min_length=1, max_length=1000, description="用户反馈：执行结果 / 设备状态 / 选中的排查方向")
+    device_type: Optional[str] = Field(None, description="设备类型筛选（可选）")
 
 
 class ManualLookupRequest(BaseModel):
@@ -458,15 +467,24 @@ async def expert_answer_stream(
             references.sort(key=lambda x: x.get("score", 0), reverse=True)
             references = references[:8]
 
+            # 首轮增强：共因/关联判定 + 维修优先级 + 2-3 个方向选项（新增，供多轮引导）
+            first_round = expert_repair_agent.generate_first_round(request.question, faults)
+            session_id = expert_repair_agent.create_session(
+                request.question, sub_queries, faults, first_round["analysis"])
+
+            yield f"data: {json_module.dumps({'type': 'answer', 'content': first_round['analysis']}, ensure_ascii=False)}\n\n"
             yield f"event: references\ndata: {json_module.dumps(references, ensure_ascii=False)}\n\n"
 
             try:
-                for sse_msg in answer_agent.stream_answer_multi(request.question, faults):
+                for sse_msg in answer_agent.stream_answer_multi(request.question, faults, emit_done=False):
                     yield sse_msg
             except Exception as e:
                 logger.error(f"[Expert] 多故障流式生成失败: {e}")
-                yield f"data: {json_module.dumps({'type': 'answer', 'content': f'生成失败: {e}'}, ensure_ascii=False)}\n\n"
-                yield f"data: {json_module.dumps({'type': 'done', 'confidence': 0, 'sources_count': len(references)}, ensure_ascii=False)}\n\n"
+                yield f"data: {json_module.dumps({'type': 'answer', 'content': '生成失败，请稍后重试。'}, ensure_ascii=False)}\n\n"
+
+            # 引导选项 + 完成事件（done 携带 session_id 供前端发起后续引导轮）
+            yield f"event: options\ndata: {json_module.dumps(first_round['options'], ensure_ascii=False)}\n\n"
+            yield f"data: {json_module.dumps({'type': 'done', 'confidence': 0, 'sources_count': len(references), 'session_id': session_id}, ensure_ascii=False)}\n\n"
             return
 
         # ===== 单故障：ReAct 智能检索（强制混合）+ 五段式分析回答 =====
@@ -489,20 +507,72 @@ async def expert_answer_stream(
         filtered_merged = _filter_rerank_cases(tools, merged, request.question,
                                                require_device=device, require_keywords=tuple(kws))
         references = [_to_reference(ref) for ref in filtered_merged[:8]]
+        faults_single = [{"name": sub_queries[0], "cases": filtered_merged}]
+
+        # 首轮增强：单故障也生成"定位分析 + 优先级 + 方向选项"并创建会话（供多轮引导）
+        first_round = expert_repair_agent.generate_first_round(request.question, faults_single)
+        session_id = expert_repair_agent.create_session(
+            request.question, sub_queries, faults_single, first_round["analysis"])
+
+        yield f"data: {json_module.dumps({'type': 'answer', 'content': first_round['analysis']}, ensure_ascii=False)}\n\n"
         yield f"event: references\ndata: {json_module.dumps(references, ensure_ascii=False)}\n\n"
 
         try:
-            for sse_msg in answer_agent.stream_answer(request.question, filtered_merged):
+            for sse_msg in answer_agent.stream_answer(request.question, filtered_merged, emit_done=False):
                 yield sse_msg
         except Exception as e:
             logger.error(f"[Expert] 流式生成失败: {e}")
-            yield f"data: {json_module.dumps({'type': 'answer', 'content': f'生成失败: {e}'}, ensure_ascii=False)}\n\n"
-            yield f"data: {json_module.dumps({'type': 'done', 'confidence': 0, 'sources_count': len(references)}, ensure_ascii=False)}\n\n"
+            yield f"data: {json_module.dumps({'type': 'answer', 'content': '生成失败，请稍后重试。'}, ensure_ascii=False)}\n\n"
+
+        yield f"event: options\ndata: {json_module.dumps(first_round['options'], ensure_ascii=False)}\n\n"
+        yield f"data: {json_module.dumps({'type': 'done', 'confidence': 0, 'sources_count': len(references), 'session_id': session_id}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(stream(), media_type="text/event-stream")
 
 
-# ==================== 专家模式内部工具 ====================
+@router.post("/answer/expert/step", summary="专家模式下一步（多轮引导：分析+引导）")
+async def expert_next_step(request: ExpertStepRequest):
+    """专家模式后续引导轮：用户反馈执行结果 → AI 判断是否解决，给出下一步 2-3 个方向
+
+    SSE 事件（与首轮 /answer/expert 一致）：
+    - {"type": "thinking"} — 思考中
+    - {"type": "answer", "content": "..."} — 【分析】+ 引导说明（含是否解决判断）
+    - event: options — 2-3 个方向选项（按优先级排序，第 1 个为推荐）
+    - {"type": "done", "session_id": "...", "completed": true/false, "summary": "..."} — 完成
+    """
+    import json as json_module
+
+    async def stream():
+        yield f"data: {json_module.dumps({'type': 'thinking'}, ensure_ascii=False)}\n\n"
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(expert_repair_agent.next_step, request.session_id, request.message),
+                timeout=60,          # 引导轮超时 60s，超时给可感知的降级提示
+            )
+        except asyncio.TimeoutError:
+            logger.error("[Expert] 专家引导轮超时")
+            result = ExpertStepResult(session_id=request.session_id,
+                                      analysis="引导生成超时，请补充执行结果或设备状态后重试。")
+        except Exception as e:
+            logger.error(f"[Expert] 专家引导轮失败: {e}")
+            result = ExpertStepResult(session_id=request.session_id,
+                                      analysis="引导生成失败，请稍后重试。")
+
+        yield f"data: {json_module.dumps({'type': 'answer', 'content': result.analysis}, ensure_ascii=False)}\n\n"
+        if result.summary:
+            yield f"data: {json_module.dumps({'type': 'answer', 'content': result.summary}, ensure_ascii=False)}\n\n"
+        options = [{"id": o.id, "cause": o.cause, "diagnostic_action": o.diagnostic_action}
+                   for o in result.options]
+        yield f"event: options\ndata: {json_module.dumps(options, ensure_ascii=False)}\n\n"
+        done_payload = json_module.dumps({
+            "type": "done",
+            "session_id": result.session_id,
+            "completed": result.status == "completed",
+            "summary": result.summary,
+        }, ensure_ascii=False)
+        yield f"data: {done_payload}\n\n"
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
 
 def _run_agent_search(tools: RetrievalTools, query: str, device_type: Optional[str],
                       fault_code: Optional[str], top_k: int,

@@ -143,7 +143,7 @@
             <el-icon :size="40" color="#0FC6C2"><ChatLineSquare /></el-icon>
           </div>
           <h3>{{ repairMode === 'guided' ? '追踪维修模式' : repairMode === 'expert' ? '专家问答模式' : '向 AI 助手提问' }}</h3>
-          <p>{{ repairMode === 'guided' ? '描述设备故障现象，AI 将逐步引导排查和维修' : repairMode === 'expert' ? 'AI 将多轮智能检索知识库（自动改写查询、多路检索），基于高质量案例给出深入分析' : '描述设备故障现象，AI 将检索知识库中的维修案例和解决方案' }}</p>
+          <p>{{ repairMode === 'guided' ? '描述设备故障现象，AI 将逐步引导排查和维修' : repairMode === 'expert' ? 'AI 多轮智能检索知识库，先给出深入分析，再像老师傅一样逐步引导排查' : '描述设备故障现象，AI 将检索知识库中的维修案例和解决方案' }}</p>
           <div class="quick-hints">
             <span
               v-for="tag in quickTags"
@@ -218,6 +218,23 @@
                         <span class="chip-score">{{ (item.score * 100).toFixed(0) }}%</span>
                       </div>
                     </div>
+                    <!-- 专家模式排查方向选项 -->
+                    <div v-if="msg.options?.length" class="msg-options">
+                      <div class="options-title">排查方向<span class="options-hint">点击选择，第 1 个为推荐</span></div>
+                      <div
+                        v-for="(opt, oi) in msg.options"
+                        :key="opt.id || oi"
+                        class="option-card"
+                        :class="{ 'option-recommend': oi === 0 }"
+                        @click="sendOption(opt)"
+                      >
+                        <div class="option-head">
+                          <span class="option-badge">{{ oi === 0 ? '推荐' : (opt.id || ('选项' + (oi + 1))) }}</span>
+                          <span class="option-cause">{{ opt.cause }}</span>
+                        </div>
+                        <div class="option-action">{{ opt.diagnostic_action }}</div>
+                      </div>
+                    </div>
                     <!-- 性能指标 -->
                     <div v-if="msg.meta" class="msg-meta">
                       <span v-if="msg.meta.sourcesCount" class="meta-tag">案例 {{ msg.meta.sourcesCount }}</span>
@@ -273,7 +290,7 @@
               v-model="inputText"
               type="textarea"
               :rows="1"
-              :placeholder="repairMode === 'guided' ? '请输入操作结果和设备状态...' : repairMode === 'expert' ? '描述模糊或复杂的维修问题，专家模式将多轮检索深度分析...' : '请输入维修相关问题，规范的提问：产品型号+故障描述...'"
+              :placeholder="repairMode === 'guided' ? '请输入操作结果和设备状态...' : repairMode === 'expert' ? '描述模糊或复杂的维修问题，专家模式将深度分析并引导排查...' : '请输入维修相关问题，规范的提问：产品型号+故障描述...'"
               class="chat-textarea"
               @keydown.enter.prevent.exact="handleSend"
               resize="none"
@@ -385,7 +402,7 @@ const modeIntroCards = [
     color: '#3370FF',
     when: '一台设备同时出现多个故障，想一次性问清楚',
     example: '"锁模力不够出飞边，油温65度报警，熔胶马达不转，三个一起查"',
-    desc: 'AI 把复合问题拆成多个单故障，分别检索各自的历史案例、按故障分组回答，互不干扰、不串味。',
+    desc: 'AI 把复合问题拆成多个单故障，分别检索各自的历史案例、按故障分组回答；并判断是否同根因、给出维修优先级，像老师傅一样逐步引导排查。',
   },
 ]
 
@@ -405,6 +422,7 @@ const saveSessions = () => {
       _createdAt: s._createdAt,
       unread: false,
       type: s.type || 'qa',
+      _expertSessionId: s._expertSessionId || '',   // 专家模式多轮会话 ID（随会话持久化）
       messages: s.messages.map(m => {
         if (m.role === 'assistant') {
           return {
@@ -412,6 +430,7 @@ const saveSessions = () => {
             content: m.content,
             results: m.results || [],
             meta: m.meta || null,
+            options: m.options || [],               // 专家模式排查方向选项
           }
         }
         if (m.role === 'summary') {
@@ -753,6 +772,12 @@ const sendMessage = (text) => {
   handleSend()
 }
 
+// 专家模式：点击排查方向选项 → 作为下一轮反馈发送（多轮引导）
+const sendOption = (opt) => {
+  if (sending.value) return
+  sendMessage(`执行排查方向：${opt.cause}｜${opt.diagnostic_action}`)
+}
+
 const handleSend = async () => {
   const text = inputText.value.trim()
   if (!text || sending.value) return
@@ -789,14 +814,20 @@ const handleSend = async () => {
   const startTime = Date.now()
 
   try {
+    // 专家模式多轮：已有会话 ID 则走后续引导轮，否则走首轮
+    const isExpertStep = repairMode.value === 'expert' && !!(session._expertSessionId || '')
     const url = isGuided
       ? '/api/v1/search/guided-repair/chat'
-      : repairMode.value === 'expert'
-        ? '/api/v1/search/answer/expert'
-        : '/api/v1/search/answer/stream'
+      : isExpertStep
+        ? '/api/v1/search/answer/expert/step'
+        : repairMode.value === 'expert'
+          ? '/api/v1/search/answer/expert'
+          : '/api/v1/search/answer/stream'
     const body = isGuided
       ? JSON.stringify({ message: text, session_id: guidedSessionId.value || undefined })
-      : JSON.stringify({ question: text, top_k: 8 })
+      : isExpertStep
+        ? JSON.stringify({ session_id: session._expertSessionId, message: text })
+        : JSON.stringify({ question: text, top_k: 8 })
 
     const response = await fetch(url, {
       method: 'POST',
@@ -838,6 +869,16 @@ const handleSend = async () => {
           }
           continue
         }
+        if (line.startsWith('event: options')) {
+          // 专家模式排查方向选项（首轮 /expert 与后续轮 /expert/step 都会发）
+          if (i + 1 < lines.length && lines[i + 1].startsWith('data: ')) {
+            try {
+              aiMsg.options = JSON.parse(lines[i + 1].slice(6))
+            } catch {}
+            i++
+          }
+          continue
+        }
         if (line.startsWith('event:')) continue
         if (refsBuffer && line.startsWith('data: ')) {
           try { aiMsg.results = JSON.parse(line.slice(6)) } catch {}
@@ -867,6 +908,10 @@ const handleSend = async () => {
               if (isGuided) {
                 guidedSessionId.value = data.session_id || ''
               } else {
+                if (data.session_id) {
+                  // 专家模式首轮：记录会话 ID，后续轮走 /answer/expert/step
+                  session._expertSessionId = data.session_id
+                }
                 aiMsg.meta = {
                   confidence: data.confidence,
                   sourcesCount: data.sources_count || aiMsg.results.length,
@@ -1336,6 +1381,74 @@ const showSourceDetail = (item) => {
   margin-top: 14px;
   padding-top: 12px;
   border-top: 1px solid var(--color-border-light);
+}
+/* 专家模式排查方向选项 */
+.msg-options {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--color-border-light);
+}
+.options-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  margin-bottom: 8px;
+}
+.options-hint {
+  margin-left: 8px;
+  font-weight: 400;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+.option-card {
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  background: var(--color-bg-page);
+  border: 1px solid var(--color-border-light);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all .15s;
+}
+.option-card:hover {
+  border-color: var(--color-primary);
+  box-shadow: 0 2px 8px rgba(51, 112, 255, .12);
+}
+.option-card.option-recommend {
+  border-color: var(--color-primary);
+  background: rgba(51, 112, 255, .05);
+}
+.option-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.option-badge {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--color-primary);
+  background: rgba(51, 112, 255, .10);
+  border-radius: 4px;
+  font-weight: 600;
+}
+.option-card.option-recommend .option-badge {
+  color: #fff;
+  background: var(--color-primary);
+}
+.option-cause {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  line-height: 20px;
+}
+.option-action {
+  margin-top: 6px;
+  padding-left: 34px;
+  font-size: 12.5px;
+  color: var(--color-text-secondary);
+  line-height: 20px;
+  white-space: pre-line;
 }
 .sources-title {
   font-size: 13px;

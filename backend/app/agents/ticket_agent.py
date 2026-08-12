@@ -4,7 +4,7 @@
 - 标准化：将口语化故障描述转为结构化字段（故障码、故障现象、根本原因、解决方案）
 - 分类：确定设备类型、故障分类标签
 - 校验：检查工单信息完整性，评估整体质量
-- 输出置信度评分，驱动自动审批/人工审核决策
+- 输出置信度评分，辅助人工审核
 
 集成 LangFuse 追踪与 Redis 缓存。
 """
@@ -59,12 +59,9 @@ class TicketUnderstandingAgent:
     2. 分类 - 确定设备类型、故障分类标签、紧急程度
     3. 校验 - 检查信息完整性，给出置信度评分
 
-    置信度规则：
-    - >= 0.8：信息完整、分类明确，可自动审批通过
-    - < 0.8：信息不足或模糊，需人工审核
+    置信度评分：由"信息完整度 + 描述清晰度 + 分类确定性"综合得出，
+    仅作为人工审核的参考，工单最终一律人工审核。
     """
-
-    AUTO_APPROVE_THRESHOLD = 0.8
 
     def __init__(self):
         self._llm: Optional[ChatOpenAI] = None
@@ -116,8 +113,7 @@ class TicketUnderstandingAgent:
 
         logger.info(
             f"[TicketAgent] 分析完成 | 置信度={result.confidence:.2f} "
-            f"| 完整度={result.completeness_score:.2f} "
-            f"| 自动审批={'是' if result.confidence >= self.AUTO_APPROVE_THRESHOLD else '否'}"
+            f"| 完整度={result.completeness_score:.2f}"
         )
         return result
 
@@ -153,10 +149,10 @@ class TicketUnderstandingAgent:
 - **validation_notes**: 校验说明（20-80字）
 
 ### 4. 置信度
-根据信息完整度、描述清晰度、分类确定性综合给出 0-1 的置信度：
-- 0.8-1.0: 信息完整，分类明确，可自动审批
-- 0.5-0.79: 信息基本可用但需人工确认
-- 0.0-0.49: 信息严重不足，必须人工审核
+根据信息完整度、描述清晰度、分类确定性综合给出 0-1 的置信度（作为人工审核的参考）：
+- 0.8-1.0: 信息完整，分类明确
+- 0.5-0.79: 信息基本可用
+- 0.0-0.49: 信息严重不足
 
 ## 返回格式（严格 JSON，不要包含代码块标记）：
 {

@@ -446,9 +446,14 @@ class AnswerAgent:
             return "再见！如有设备问题随时找我。"
         return f"您好！请描述您遇到的设备故障现象，我会为您检索相关的维修案例并给出分析建议。"
 
-    def stream_answer(self, question: str, cases: List[Dict]):
+    def stream_answer(self, question: str, cases: List[Dict], emit_done: bool = True):
         """
         流式生成回答 - 返回一个生成器，逐 token yield
+
+        Args:
+            question: 用户问题
+            cases: 检索案例列表
+            emit_done: 是否发送完成信号（False 时由调用方发送，避免重复）
 
         Yields:
             str: SSE 格式的消息片段
@@ -457,14 +462,16 @@ class AnswerAgent:
         if not self._is_technical_query(question):
             answer = self._answer_non_technical(question)
             yield f"data: {json.dumps({'type': 'answer', 'content': answer}, ensure_ascii=False)}\n\n"
-            yield f"data: {json.dumps({'type': 'done', 'confidence': 0, 'sources_count': 0}, ensure_ascii=False)}\n\n"
+            if emit_done:
+                yield f"data: {json.dumps({'type': 'done', 'confidence': 0, 'sources_count': 0}, ensure_ascii=False)}\n\n"
             return
 
         # 无案例 → 直接返回
         if not cases:
             answer = "未检索到与该问题相关的历史案例。请尝试使用更具体的设备型号或故障描述重新提问。"
             yield f"data: {json.dumps({'type': 'answer', 'content': answer}, ensure_ascii=False)}\n\n"
-            yield f"data: {json.dumps({'type': 'done', 'confidence': 0, 'sources_count': 0}, ensure_ascii=False)}\n\n"
+            if emit_done:
+                yield f"data: {json.dumps({'type': 'done', 'confidence': 0, 'sources_count': 0}, ensure_ascii=False)}\n\n"
             return
 
         # 案例相关度过低 → 视为无匹配
@@ -472,7 +479,8 @@ class AnswerAgent:
         if max_score < self.SCORE_THRESHOLD:
             answer = "未检索到与该问题相关的历史案例。请尝试使用更具体的设备型号或故障描述重新提问。"
             yield f"data: {json.dumps({'type': 'answer', 'content': answer}, ensure_ascii=False)}\n\n"
-            yield f"data: {json.dumps({'type': 'done', 'confidence': 0, 'sources_count': 0}, ensure_ascii=False)}\n\n"
+            if emit_done:
+                yield f"data: {json.dumps({'type': 'done', 'confidence': 0, 'sources_count': 0}, ensure_ascii=False)}\n\n"
             return
 
         # 构建 prompt
@@ -540,9 +548,10 @@ class AnswerAgent:
             yield f"data: {json.dumps({'type': 'answer', 'content': f'回答生成失败，请稍后重试。'}, ensure_ascii=False)}\n\n"
 
         # 发送完成信号
-        yield f"data: {json.dumps({'type': 'done', 'confidence': self._estimate_confidence(cases), 'sources_count': len(cases)}, ensure_ascii=False)}\n\n"
+        if emit_done:
+            yield f"data: {json.dumps({'type': 'done', 'confidence': self._estimate_confidence(cases), 'sources_count': len(cases)}, ensure_ascii=False)}\n\n"
 
-    def stream_answer_multi(self, question: str, faults: List[Dict]):
+    def stream_answer_multi(self, question: str, faults: List[Dict], emit_done: bool = True):
         """
         多故障分组流式回答 - 按故障分节生成（专家模式多故障专用）
 
@@ -557,7 +566,8 @@ class AnswerAgent:
         if not self._is_technical_query(question):
             answer = self._answer_non_technical(question)
             yield f"data: {json.dumps({'type': 'answer', 'content': answer}, ensure_ascii=False)}\n\n"
-            yield f"data: {json.dumps({'type': 'done', 'confidence': 0, 'sources_count': 0}, ensure_ascii=False)}\n\n"
+            if emit_done:
+                yield f"data: {json.dumps({'type': 'done', 'confidence': 0, 'sources_count': 0}, ensure_ascii=False)}\n\n"
             return
 
         # 没有任何案例或相关度过低 → 视为无匹配
@@ -566,7 +576,8 @@ class AnswerAgent:
         if not all_cases or max_score < self.SCORE_THRESHOLD:
             answer = "未检索到与该问题相关的历史案例。请尝试使用更具体的设备型号或故障描述重新提问。"
             yield f"data: {json.dumps({'type': 'answer', 'content': answer}, ensure_ascii=False)}\n\n"
-            yield f"data: {json.dumps({'type': 'done', 'confidence': 0, 'sources_count': 0}, ensure_ascii=False)}\n\n"
+            if emit_done:
+                yield f"data: {json.dumps({'type': 'done', 'confidence': 0, 'sources_count': 0}, ensure_ascii=False)}\n\n"
             return
 
         # 构建按故障分组的案例文本（每个故障独立小节，缺案例的故障显式标注）
@@ -626,7 +637,8 @@ class AnswerAgent:
             yield f"data: {json.dumps({'type': 'answer', 'content': '回答生成失败，请稍后重试。'}, ensure_ascii=False)}\n\n"
 
         # 发送完成信号
-        yield f"data: {json.dumps({'type': 'done', 'confidence': self._estimate_confidence(all_cases), 'sources_count': len(all_cases)}, ensure_ascii=False)}\n\n"
+        if emit_done:
+            yield f"data: {json.dumps({'type': 'done', 'confidence': self._estimate_confidence(all_cases), 'sources_count': len(all_cases)}, ensure_ascii=False)}\n\n"
 
 
 

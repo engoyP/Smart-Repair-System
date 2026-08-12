@@ -50,10 +50,12 @@ uploads/
 .DS_Store
 Thumbs.db
 
-# ===== 临时调试脚本 =====
+# ===== 临时调试脚本（可能含真实密钥，禁止提交）=====
 _tmp_*.py
 _bench_*.py
 _peek_*.py
 _verify_*.py
 _test_*.py
 _check_*.py
+_probe_*.py
+_insert_*.sql

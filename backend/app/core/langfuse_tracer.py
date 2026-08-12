@@ -10,7 +10,6 @@
 import time
 import json
 import uuid
-import base64
 import threading
 from typing import Optional, Dict, Any, List, Callable
 from contextlib import contextmanager
@@ -83,7 +82,7 @@ class RAGFlowClient:
                         "name": self.traces_dataset,
                         "description": "LLM 调用追踪数据（自动生成）",
                         "chunk_method": "naive",
-                        "embedding_model": "BAAI/bge-large-zh-v1.5@BAAI",
+                        "embedding_model": "Qwen3-Embedding-0.6B@OpenAI-API-Compatible",
                         "permission": "me",
                     },
                     timeout=10,
@@ -98,7 +97,11 @@ class RAGFlowClient:
         return None
 
     def upload_trace(self, trace_record: Dict[str, Any]) -> Optional[str]:
-        """将一条完整 trace 作为文档写入 RAGFlow"""
+        """将一条完整 trace 作为文档写入 RAGFlow（适配 v0.26 流程）
+
+        1) POST /api/v1/files（multipart 上传 trace JSON，创建文件记录）
+        2) POST /api/v1/files/link-to-datasets（文件关联到数据集并触发解析）
+        """
         dataset_id = self.ensure_traces_dataset()
         if not dataset_id:
             return None
@@ -106,23 +109,31 @@ class RAGFlowClient:
             trace_id = trace_record.get("trace_id", str(uuid.uuid4()))
             content = json.dumps(trace_record, ensure_ascii=False, indent=2)
             filename = f"trace_{trace_id}.json"
-            encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
 
-            r = self._post(
-                "/api/v1/datasets/upload",
-                json={
-                    "dataset_id": dataset_id,
-                    "document_list": [
-                        {"display_name": filename, "blob": encoded}
-                    ],
-                },
-                timeout=10,
+            r = self._session.post(
+                f"{self.host}/api/v1/files",
+                files={"file": (filename, content.encode("utf-8"), "application/json")},
+                headers={"Content-Type": None},  # 让 requests 自动生成 multipart boundary
+                timeout=30,
             )
-            if r.status_code == 200:
-                docs = r.json().get("data", {}).get("document", [])
-                doc_id = docs[0]["id"] if docs else None
-                return doc_id
-            logger.debug(f"[RAGFlow] 上传 trace 失败: {r.status_code} {r.text[:200]}")
+            if r.status_code != 200:
+                logger.debug(f"[RAGFlow] 上传 trace 文件失败: {r.status_code} {r.text[:200]}")
+                return None
+            data = r.json().get("data", [])
+            file_id = data[0].get("id") if isinstance(data, list) and data else None
+            if not file_id:
+                logger.debug(f"[RAGFlow] trace 文件响应异常: {r.text[:200]}")
+                return None
+
+            r2 = self._session.post(
+                f"{self.host}/api/v1/files/link-to-datasets",
+                json={"file_ids": [file_id], "kb_ids": [dataset_id]},
+                timeout=30,
+            )
+            if r2.status_code == 200 and r2.json().get("code") == 0:
+                logger.info(f"[RAGFlow] trace 关联数据集成功: {filename} -> file_id={file_id[:12]}")
+                return file_id
+            logger.debug(f"[RAGFlow] 关联 trace 到数据集失败: {r2.status_code} {r2.text[:200]}")
             return None
         except Exception as e:
             logger.debug(f"[RAGFlow] 上传 trace 异常: {e}")

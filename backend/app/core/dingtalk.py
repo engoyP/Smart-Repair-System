@@ -596,7 +596,7 @@ class DingTalkClient:
 
     def send_approval_request(self, userid: str, work_order_no: str, device: str,
                                confidence: float, description: str, url: str = "") -> bool:
-        """工单审核通知（AI 置信度不足需人工审核）"""
+        """工单待人工审核通知（置信度仅作参考展示）"""
         level = "低" if confidence < 0.5 else "中"
         content = f"""## 待审核工单
         - **工单编号**: {work_order_no}

@@ -236,7 +236,6 @@ class TicketAnalysisResponse(BaseModel):
     validation_notes: str = ""
     # 综合
     confidence: float = 0.0
-    auto_approved: bool = False
     raw_reasoning: str = ""
     suggested_actions: List[str] = []
     # 库存关联

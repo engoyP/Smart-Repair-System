@@ -57,11 +57,11 @@ if ($conflicts.Count -gt 0) {
 }
 Write-Host "[OK] 端口检查通过，无冲突。" -ForegroundColor Green
 
-# ---- [1] Docker 中间件 ----
+# ---- [1/4] Docker 中间件 ----
 Write-Host ""
-Write-Host "[1/3] 启动 Docker 中间件（PG/Redis/Milvus/etcd/MinIO）..." -ForegroundColor Cyan
+Write-Host "[1/4] 启动 Docker 中间件（PG/Redis/Milvus/etcd/MinIO）..." -ForegroundColor Cyan
 try {
-    docker compose -f (Join-Path $Root 'docker-compose.yml') up -d
+    docker compose -f (Join-Path $Root 'docker-compose.dev.yml') up -d
     if ($LASTEXITCODE -ne 0) { throw "docker compose 执行失败" }
     Write-Host "    已拉起，等待健康检查（约 20 秒）..."
     Start-Sleep -Seconds 20
@@ -71,9 +71,9 @@ try {
     exit 1
 }
 
-# ---- [2] 后端 ----
+# ---- [2/4] 后端 ----
 Write-Host ""
-Write-Host "[2/3] 启动后端 (http://localhost:18080) ..." -ForegroundColor Cyan
+Write-Host "[2/4] 启动后端 (http://localhost:18080) ..." -ForegroundColor Cyan
 if (Get-NetTCPConnection -LocalPort 18080 -State Listen -ErrorAction SilentlyContinue) {
     Write-Host "    后端已在运行，跳过。"
 } else {
@@ -84,9 +84,24 @@ if (Get-NetTCPConnection -LocalPort 18080 -State Listen -ErrorAction SilentlyCon
     Write-Host ("    后端已启动（模型加载约需 1 分钟），日志: {0}" -f $BackendLog)
 }
 
-# ---- [3] 前端 ----
+# ---- [3/4] Embedding 编码服务 ----
 Write-Host ""
-Write-Host "[3/3] 启动前端 (http://localhost:4173) ..." -ForegroundColor Cyan
+Write-Host "[3/4] 启动 Embedding 服务 (http://localhost:8010) ..." -ForegroundColor Cyan
+if (Get-NetTCPConnection -LocalPort 8010 -State Listen -ErrorAction SilentlyContinue) {
+    Write-Host "    Embedding 服务已在运行，跳过。"
+} else {
+    $env:CUDA_VISIBLE_DEVICES = ""  # CUDA 加载偶发崩溃，强制 CPU 保证稳定
+    Start-Process -FilePath 'python' `
+        -ArgumentList '-m', 'app.core.embedding_server', '--host', '0.0.0.0', '--port', '8010' `
+        -WorkingDirectory $BackendDir -WindowStyle Hidden `
+        -RedirectStandardOutput (Join-Path $BackendDir 'logs\embedding_server.log') `
+        -RedirectStandardError (Join-Path $BackendDir 'logs\embedding_server.err.log')
+    Write-Host "    Embedding 服务已启动（模型加载约需 1-2 分钟）。"
+}
+
+# ---- [4/4] 前端 ----
+Write-Host ""
+Write-Host "[4/4] 启动前端 (http://localhost:4173) ..." -ForegroundColor Cyan
 if (Get-NetTCPConnection -LocalPort 4173 -State Listen -ErrorAction SilentlyContinue) {
     Write-Host "    前端已在运行，跳过。"
 } else {

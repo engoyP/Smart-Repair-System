@@ -1,7 +1,7 @@
 # Smart-Repair-System 智能维修系统 · 面试学习指南
 
 > 本文档面向求职面试准备，覆盖项目架构、技术选型理由、核心模块原理、踩坑经验与高频面试问答。
-> 项目根目录：`smart repair/Smart-Repair-System-master/Smart-Repair-System-master/Smart-Repair-System-master`
+> 项目根目录：`d:\Smart-Repair-System`
 
 ---
 
@@ -13,7 +13,7 @@
 4. [核心模块详解](#4-核心模块详解)
 5. [数据模型与存储设计](#5-数据模型与存储设计)
 6. [部署与运维](#6-部署与运维)
-7. [踩过的坑与解决方案](#7-踩过的坑与解决方案)
+7. [项目进行中遇到的问题与解决方案](#7-项目进行中遇到的问题与解决方案)
 8. [高频面试 Q&A](#8-高频面试-qa)
 9. [项目亮点与可吹嘘的点](#9-项目亮点与可吹嘘的点)
 10. [面试演示话术](#10-面试演示话术)
@@ -31,19 +31,21 @@
 | 能力 | 技术实现 |
 |------|----------|
 | 工单全生命周期管理 | FastAPI + PostgreSQL + Alembic |
-| 维修知识库 RAG 检索 | Milvus 向量 + PG BM25 + RRF 融合 + 加权重排 |
-| AI 分析型问答 | DeepSeek LLM + 流式 SSE + 五段式结构化回答 |
-| 工单智能理解 | LLM 标准化/分类/校验三步走 + 置信度驱动审批 |
+| 维修知识库 RAG 检索 | 双库多路（知识向量/BM25 + 手册精确/手册向量）+ RRF 融合 + 加权重排 + 错误码置顶 |
+| AI 分析型问答 | DeepSeek LLM + 流式 SSE + 五段式结构化回答 + 验证 Agent 三层把关 |
+| 工单智能理解 | LLM 标准化/分类/校验三步走 + 提交时 AI 回填缺失字段 |
 | 引导式追踪维修 | LangGraph 对话状态机 + Redis 会话 |
 | 钉钉企业集成 | OAuth + Stream 长连接 + 机器人 LangGraph 路由 |
 | 专家模式 | 多故障拆解（规则预检 + LLM）+ 并行 ReAct 检索 + 分组流式回答 |
+| 工单→知识沉淀闭环 | 完成工单自动抽取 → 三层去重 → 发布 → 同步 Milvus（数据飞轮） |
+| MCP 集成 | fastmcp 将检索/工单/库存能力暴露为标准 MCP 工具（Streamable HTTP） |
 
 ### 1.3 业务价值
 
 1. **(1)** 维修响应时间从"问老师傅"的几十分钟缩短到 AI 检索的几秒
 2. **(2)** 隐性经验显性化：老师傅离职不带走知识
 3. **(3)** 复合故障（锁模力+油温+马达同时出问题）能拆解成多个单故障并行诊断，避免单检索语义稀释
-4. **(4)** 工单质量自动审核：置信度 ≥ 0.8 自动通过，< 0.8 转人工，降低审核成本
+4. **(4)** 工单质量把关：提交完成时 AI 标准化分析并回填缺失字段，主管/管理员最终审核把关，保证入库知识质量
 
 ---
 
@@ -53,18 +55,20 @@
 
 | 技术 | 版本 | 选型理由 |
 |------|------|----------|
-| **FastAPI** | 0.109.0 | 原生 async + Pydantic 校验 + OpenAPI 自动文档，适合 AI 接口的流式 SSE |
-| **SQLAlchemy** | 2.0 | ORM，Type 注解更现代；项目主要用同步 Session（FastAPI 路由层 async + 阻塞调用 ORM） |
-| **Pydantic** | 2.x | v2 性能比 v1 快 5-10 倍；所有 API 请求/响应严格类型化 |
-| **Alembic** | - | 数据库迁移版本控制 |
-| **loguru** | - | 比 stdlib logging 配置简单，原生支持 rotation/retention |
+| **FastAPI** | 0.135.3 | 原生 async + Pydantic 校验 + OpenAPI 自动文档，适合 AI 接口的流式 SSE |
+| **SQLAlchemy** | 2.0.25 | ORM，Type 注解更现代；项目主要用同步 Session（FastAPI 路由层 async + 阻塞调用 ORM） |
+| **Pydantic** | 2.12.5 | v2 性能比 v1 快 5-10 倍；所有 API 请求/响应严格类型化 |
+| **Alembic** | 1.13.1 | 数据库迁移版本控制 |
+| **loguru** | 0.7.2 | 比 stdlib logging 配置简单，原生支持 rotation/retention |
 
 ### 2.2 AI / LLM 栈
 
 | 技术 | 用途 | 选型理由 |
 |------|------|----------|
-| **LangChain** | 0.1.20 | LLM 调用统一封装，Prompt 模板，Message 抽象 |
-| **LangGraph** | 1.2.6| StateGraph 状态机，适合钉钉意图路由和引导式维修的多步对话 |
+| **LangChain** | 1.3.13 | LLM 调用统一封装，Prompt 模板，Message 抽象 |
+| **langchain-openai** | 1.2.2 | OpenAI 兼容适配层，DeepSeek API 走这个通道 |
+| **langchain-community** | 0.4.2 | 社区集成（工具、向量库适配等） |
+| **LangGraph** | 1.2.6 | StateGraph 状态机，适合钉钉意图路由和引导式维修的多步对话 |
 | **DeepSeek** | deepseek-chat | 国产 LLM，性价比高，中文维修场景效果好 |
 | **Qwen3-Embedding-0.6B** | 本地 Embedding | 阿里出品，1024 维，**本地部署省 API 费用**，取 EOS hidden state + L2 归一化 |
 
@@ -73,7 +77,7 @@
 | 技术 | 用途 | 选型理由 |
 |------|------|----------|
 | **PostgreSQL** | 16 | 业务数据 + BM25 全文检索（ILIKE 加权评分）+ 会话持久化 |
-| **Milvus** | 2.4 | 向量数据库，**IVF_FLAT + COSINE** 索引，1024 维 |
+| **Milvus** | 2.4.15 | 向量数据库，**IVF_FLAT + COSINE** 索引，1024 维 |
 | **Redis** | 7 | 会话缓存（24h TTL）+ 复用检索结果 |
 | **MinIO** | - | Milvus 的对象存储后端 |
 | **etcd** | - | Milvus 的元数据存储 |
@@ -124,34 +128,58 @@
 │  │  │ TicketAgent │  │ RobotGraph   │  │ FaultDecomposer│   │   │
 │  │  │ (工单理解)   │  │ (钉钉路由)    │  │ (专家模式拆解)  │   │   │
 │  │  └─────────────┘  └──────────────┘  └────────────────┘   │   │
-│  │  ┌─────────────┐                                          │   │
-│  │  │ VerifyAgent │  RetrievalAssistantAgent（ReAct 循环）    │   │
-│  │  │ (三层把关)   │  (智能问答/专家/钉钉共用检索编排层)         │   │
-│  │  └─────────────┘                                          │   │
+│  │  ┌─────────────┐  ┌──────────────┐  ┌────────────────┐   │   │
+│  │  │ VerifyAgent │  │ DedupAgent   │  │ RetrievalAsst  │   │   │
+│  │  │ (三层把关)   │  │ (知识判重)    │  │ Agent(ReAct循环)│   │   │
+│  │  └─────────────┘  └──────────────┘  └────────────────┘   │   │
+│  │  ┌──────────────────────────────────────────────────────┐ │   │
+│  │  │  KnowledgeExtractorAgent（工单→知识抽取，数据飞轮）       │ │   │
+│  │  └──────────────────────────────────────────────────────┘ │   │
 │  └──────────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────────┐   │
-│  │  工具层 RetrievalTools                                    │   │
-│  │  vector_search / bm25_search / rrf_merge / weighted_rerank│   │
-│  │  query_extractor / clean_query_for_retrieval              │   │
+│  │  检索编排层 RetrievalFlow（问答/专家/钉钉/MCP 共用）        │   │
+│  │  retrieve_hybrid：查询理解→双库多路召回→RRF融合            │   │
+│  │  filter_rerank_cases：过滤→加权重排→严格过滤→错误码置顶    │   │
+│  │  extract_error_codes：纯正则识别错误码→决定 2 路/4 路      │   │
+│  └──────────────────────────────────────────────────────────┘   │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │  工具层 RetrievalTools + QueryExtractor                  │   │
+│  │  vector_search / bm25_search / manual_code_search        │   │
+│  │  manual_vector_search / rrf_merge / weighted_rerank      │   │
+│  │  query_extractor（白名单+LLM兜底）/ clean_query           │   │
 │  └──────────────────────────────────────────────────────────┘   │
 └─┬───────────────┬───────────────┬───────────────┬───────────────┘
   │               │               │               │
-┌─▼─────┐    ┌───▼────┐    ┌────▼─────┐   ┌─────▼─────┐
-│PostgreSQL│  │ Redis  │    │  Milvus  │   │ DeepSeek │
-│ 业务数据 │   │会话缓存 │    │ 向量库   │   │   LLM    │
-│ BM25检索 │   │24h TTL │    │IVF_FLAT  │   │          │
-└────────┘   └────────┘    └────┬─────┘   └───────────┘
-                                │
-                          ┌─────▼─────┐
-                          │  MinIO    │  ← Milvus 对象存储
-                          │  etcd     │  ← Milvus 元数据
-                          └───────────┘
+┌─▼─────────┐ ┌───▼─────┐  ┌──────▼─────┐   ┌─────▼─────┐
+│ PostgreSQL│ │  Redis  │  │   Milvus   │   │ DeepSeek  │
+│ 业务数据   │ │ 会话缓存 │  │  双集合     │   │   LLM     │
+│ knowledge │ │ 24h TTL │  │ knowledge  │   │           │
+│ manual_   │ │         │  │ log_code   │   │           │
+│ code_     │ │         │  │ IVF_FLAT   │   │           │
+│ entries   │ │         │  │ + COSINE   │   │           │
+│ (pg_trgm  │ │         │  │ nlist=1024 │   │           │
+│  GIN 索引) │ │         │  │ nprobe=16  │   │           │
+└───────────┘ └─────────┘  └──────┬─────┘   └───────────┘
+                                  │
+                            ┌─────▼─────┐
+                            │  MinIO    │  ← Milvus 对象存储
+                            │  etcd     │  ← Milvus 元数据
+                            └───────────┘
 
 ┌─────────────────────────────────────────────────────────────────┐
 │              外部集成：钉钉开放平台                                │
 │  OAuth 回调 / Stream 长连接 / 机器人消息 / OA 审批同步             │
+├─────────────────────────────────────────────────────────────────┤
+│              MCP Server（/mcp，Streamable HTTP）                  │
+│  search_knowledge / guided_repair_chat / query_work_order ...     │
+│  （fastmcp，API Key 或本机 IP 认证；检索走同一套 RetrievalFlow）   │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+**检索链路在架构中的位置（与 4.1 对应）**：
+- **入口复用**：智能问答（QA_GRAPH）、专家模式（FaultDecomposer → 并行 ReAct）、钉钉机器人（RobotGraph）、MCP 工具——四者都走 `retrieval_flow.py` 这一套检索编排（召回 → 融合 → 过滤重排），差异只在 Agent 分工
+- **双库四路召回**：知识库（Milvus 向量 + PG BM25）总是走；问题含错误码时增开手册库（PG 精确 `manual_code_entries` + Milvus 向量 `log_code`），最多四路（见 4.1.5）
+- **双路索引对称**：Milvus 双集合共用 IVF_FLAT + COSINE（nlist=1024/nprobe=16，见 4.1.8）；PG 的 `knowledge_items.title/content` 建 pg_trgm GIN 索引加速 BM25 的 `ILIKE %词%`（见 4.1.6）
 
 ---
 
@@ -222,6 +250,46 @@ def weighted_rerank(results, query, fault_weight, device_penalty, cleaned_query)
 def clean_query_for_retrieval(query) -> str
 ```
 
+**这些接口分两类，角色完全不同**：
+
+**① `RetrievalTools` 方法 = ReAct Agent 的"行动空间"**（对应 `retrieval_agent.py` 的 `AgentAction` 枚举，每轮 LLM 从这些动作里选一个执行）：
+
+| 接口 | 做什么 | 底层 | 适合场景 |
+|---|---|---|---|
+| `vector_search` | 向量语义检索：QueryExtractor 清洗 → 编码 → Milvus `knowledge` 集合（IVF_FLAT+COSINE） | Milvus + Embedding | 模糊/口语化描述，按意思匹配 |
+| `bm25_search` | 关键词加权检索：2/3-gram 切词 → PG `ILIKE` + 故障词 5/2 加权 | PostgreSQL | 含明确关键词/故障码/设备编号 |
+| `conditional_query` | 结构化字段精确筛选（device_type/fault_code/tags/keyword），纯 SQL 零 LLM | PostgreSQL | 已确定设备类型/故障码/标签，按字段精确捞 |
+| `graph_query` | 关联查询：以设备/故障为起点展开相关条目，`exclude_ids` 自动排除已查到的 | PostgreSQL | 查周边相关知识，补全上下文 |
+| `rewrite_query` | 查询改写（不检索）：LLM 改写成专业表述（expand_synonyms/technical_terms/generalize） | DeepSeek LLM | 结果不足时的重试路径，改写后下一轮重新检索 |
+
+> 注意：`graph_query` 名字带 "graph" 但**不是图数据库**，是知识关联查询（按字段展开 + 排除已见），没有真正的图遍历。
+
+**② 模块级函数 = 检索流水线的算法步骤**（不是给 LLM 用的，代码确定性调用）：
+
+| 接口 | 做什么 | 在链路哪一步 |
+|---|---|---|
+| `rrf_merge` | RRF 名次融合：`Σ 1/(k+rank)`，k=60，`_dedup_key` > `knowledge_id` > `id` 去重 | 多路召回之后合并排序（见 4.1.5） |
+| `weighted_rerank` | 加权重排：设备不匹配 ×0.2 / 命中率<0.3→×0.15 / ≥0.3→×(1+0.4×ratio) | RRF 之后拿回分数维度精排（见 4.1.1 Step 5） |
+| `clean_query_for_retrieval` | 查询清洗：去标点→保护故障词→中文 span 前后缀剥离+中间疑问词替换→还原 | 检索最前置（向量编码/BM25 切词前都过它） |
+
+**一句话总结关系**：
+
+```
+用户问题
+  → clean_query_for_retrieval（清洗，纯函数）
+  → vector_search + bm25_search（召回，固定双路）
+  → (含错误码) manual_code_search + manual_vector_search（手册双路）
+  → rrf_merge（融合，纯函数）
+  → weighted_rerank → filter_rerank_cases（精排，纯函数）
+  → 喂 LLM
+
+搜索页/专家模式（ReAct）额外：
+  → 每轮 LLM 从 6 个动作里选（vector/bm25/conditional/graph/rewrite/finish）
+  → rewrite_query 改写 → 下一轮重新走召回
+```
+
+> 本质区别：`RetrievalTools` 的 5 个方法是"**工具**"（供 Agent 决策调用，动态）；3 个模块级函数是"**算法**"（供流水线确定性执行，静态）。
+
 #### 4.1.4 三种检索入口的策略差异
 
 | 入口 | 端点 | 策略 | 特点 |
@@ -268,6 +336,175 @@ def clean_query_for_retrieval(query) -> str
 - 向量路 id 是 Milvus UUID、BM25 路 id 是 PG int，按 id 合并会把"同一条双路命中"拆成两条 → 双路 RRF 分加不上
 
 **④ 错误码精确匹配名次吃亏 → 置顶修正**：③ 最权威（score=1.0），但 RRF 按名次算只在一路出现，会被知识库泛案例挤下去 → 融合过滤后按 `method == manual_code_exact` **置顶**，否则"SV0436 精确命中"排不过泛相似案例。
+
+#### 4.1.6 BM25 性能优化：pg_trgm 索引（已实施）
+
+> 目标：让 `ILIKE '%关键词%'` 模糊匹配在上千条知识后依然毫秒级，避免退化为全表扫描。
+
+**为什么做（问题背景）**
+
+- BM25 的 SQL 是 `title ILIKE '%词%' OR content ILIKE '%词%'`——`%词%` 意味着"任意位置包含"，位置不确定
+- 没有索引时，PostgreSQL 只能**逐行全文扫描**（复杂度 O(n)）：几百条时毫秒级无感，到**上万条会明显变慢**
+- 向量路靠 Milvus ANN 索引天然可扩展，**BM25 是全链路唯一随数据量恶化的环节**，必须提前铺路
+
+**为什么普通索引不行**
+
+- 数据库默认的 B-tree 索引只擅长"精确值 / 前缀"匹配（`title = 'xx'` 或 `LIKE 'xx%'`），对中间的 `%xx%` 无能为力
+- 需要专门为"子串包含匹配"设计的工具：**pg_trgm**
+
+**怎么实现（原理）**
+
+1. **建索引时**（一次性）：把每段文本切成**连续的 3 字片段（trigram）**
+
+   ```
+   "注塑机温度过高" → 注塑机, 塑机温, 机温度, 温度过, 度过高
+   ```
+
+2. 用 **GIN 倒排索引**登记：每个 trigram → 包含它的所有行号
+
+   ```
+   "注塑机" → {第5行, 第89行, ...}
+   ```
+
+3. **查询时**：查询词切 trigram → 查倒排索引直接拿到候选行号（哈希定位，O(1)）→ 只对候选行做精确 ILIKE 验证（防假命中）
+
+   ```
+   10000 行全扫  →  索引锁定几十行候选  →  只验证这几行
+   ```
+
+**益处**
+
+- 查询复杂度从 **O(n)（全表扫描）降到 O(候选集)**，数据越多差距越大
+- 写入代价极小（每次插入只登记几个 trigram，毫秒级）；知识库"读多写少"，非常划算
+- 与向量路的 Milvus ANN 索引形成对称：**两条检索路都有索引支撑，数据增长不拖累任何一路**
+
+**实现细节（已落地）**
+
+- Alembic migration `7a8b9c0d1e2f`（`backend/alembic/versions/7a8b9c0d1e2f_add_pg_trgm_indexes.py`，可回滚，downgrade 只删索引保留 extension）：
+
+  ```sql
+  CREATE EXTENSION IF NOT EXISTS pg_trgm;
+  CREATE INDEX idx_knowledge_title_trgm ON knowledge_items USING gin (title gin_trgm_ops);
+  CREATE INDEX idx_knowledge_content_trgm ON knowledge_items USING gin (content gin_trgm_ops);
+  ```
+
+- 已验证：强制走索引时执行计划显示 `Bitmap Index Scan on idx_knowledge_title_trgm / idx_knowledge_content_trgm`
+
+**边界与注意**
+
+- **查询词 ≥3 字提速最明显**（有 trigram 可拆）；2 字词（如"温度"）没有 trigram，会部分退化——BM25 的 2-gram/3-gram 混合切词恰好长短互补
+- **数据量小时优化器自动选全表扫描**——全扫比索引便宜，这是正常的（当时约 25 条时就是全扫）；数据量上千后优化器会**自动**改用 Bitmap Index Scan，无需改动代码
+
+#### 4.1.7 BM25 检索调优策略
+
+> BM25 路的完整调优：召回策略（切词/加权/OR）→ 索引支撑（pg_trgm）→ 规模增长后的演进方向。
+
+**① 加权评分：故障词是核心信号，设备词是定位上下文**（`bm25_search`，已实现）
+
+| 词类别 | 命中标题 | 命中内容 | 设计意图 |
+|---|---|---|---|
+| 故障原因词 | **5** | **2** | 故障描述是相关性最核心的信号；标题比正文凝练更可信 |
+| 设备类型词 | 1 | 1 | 设备只是定位上下文，权重刻意压低 |
+
+- 一句话：**"描述什么故障"比"发生在什么设备上"更能决定相关度**——"电机异响"搜出"电机异响排查"排在"电机保养"前面
+- SQL 实现：`CASE WHEN title ILIKE :kw THEN w1 ELSE 0 END + CASE WHEN content ILIKE :kw THEN w2 ELSE 0 END` 累加计分
+
+**② 中文切词：2-gram/3-gram 重叠切分（无 jieba）**
+
+```
+"注塑机温度过高" → {注塑机, 注塑, 塑机, 温度, 过高}
+```
+
+- 中文无空格，不能按空格分词；引入 jieba 增加依赖和延迟，用 n-gram 重叠切分近似覆盖复合词变体
+- **2/3-gram 长短互补**：3-gram 有 trigram 可走 pg_trgm 索引（≥3 字提速最明显）；2-gram 兜底 2 字词（"温度"），虽部分退化但不漏
+- 英文/数字 token 按空格分词（`PLC`、`6101` 直接参与匹配）
+
+**③ 召回策略：OR 连接宁多勿漏**
+
+```sql
+WHERE (title ILIKE '%温度%' OR content ILIKE '%温度%')
+   OR (title ILIKE '%过高%' OR content ILIKE '%过高%') ...
+```
+
+- 任一关键词命中即召回，允许噪音——召回阶段的任务是"别漏"，由后段 RRF 融合 + 过滤 + 重排清理噪音（见 4.1.1 Step 4/5）
+- 排序靠加权分数，不是靠命中个数（长文本不会靠重复词刷分）
+
+**④ 索引支撑：pg_trgm**（已实施，见 4.1.6）
+
+`%词%` 任意位置匹配 B-tree 无能为力，必须 pg_trgm GIN 索引；复杂度从 O(n) 全表扫降到 O(候选集)，与向量路 Milvus ANN 索引对称。
+
+**⑤ 规模增长后的演进方向**（前瞻，当前数据量小未落地）：
+
+| 演进 | 要解决的问题 | 做法 |
+|---|---|---|
+| 确认索引生效 | 数据量上千后 ILIKE 退化 | `EXPLAIN` 确认走 `Bitmap Index Scan on idx_*_trgm` |
+| 按需分区 | 全表扫描范围仍大 | 按设备类型 / 时间分区 |
+| 动态阈值 | 固定 0.15 无法区分"没查到"和"查到不相关" | 精确查询（含故障码）阈值 0.30；模糊查询用动态百分位 |
+| 两阶段检索 | top-8 可能漏掉正确案例 | 粗排召回扩到 top 50~100 → 精排选 8 |
+| 缓存层 | 高频问题重复消耗 Milvus/LLM | `question + device_type` → Redis 缓存，知识库版本变更失效 |
+
+**面试可背的一句话**：
+> "BM25 路的调优分三层——召回层用 2/3-gram 切词 + 故障词 5/2 加权（故障是核心信号、设备是定位上下文）+ OR 宁多勿漏；索引层用 pg_trgm GIN 解决 `%词%` 全表扫描，与 Milvus ANN 索引对称；规模增长后走分区 + 动态阈值 + 两阶段检索。"
+
+#### 4.1.8 向量索引检索详解：Milvus IVF_FLAT + COSINE
+
+> 与 4.1.7（BM25 调优）对称：BM25 路靠 PG pg_trgm 索引，向量路靠 Milvus ANN 索引——两条检索路都有索引支撑，数据增长不拖累任何一路。
+> 代码：`backend/app/core/vector_store.py#L136-L150`（基类 `_create_index`，两个集合共用同一套索引）。
+
+**① 为什么需要索引（问题背景）**
+
+向量是 1024 维 float 数组，检索 = "找与查询向量最相似的 N 个"。暴力全库算余弦相似度在数据量上来后不可接受，需要**近似最近邻（ANN）索引**：牺牲一点点精度，换取几十上百倍加速。`IVF_FLAT` 是最经典的 ANN 算法之一。
+
+**② IVF_FLAT 原理：倒排文件 + 候选区暴力精排**
+
+```
+建库（写入时，一次性）：
+  1. KMeans 把所有向量聚成 nlist 个簇（中心点）
+  2. 每个向量分到距离最近的簇 → 建立"簇 → 向量列表"倒排索引
+
+查询（每次检索）：
+  1. 算查询向量与 nlist 个簇中心的距离
+  2. 只进距离最近的 nprobe 个簇（候选区）
+  3. 候选区内暴力算余弦相似度，精排返回 top_k
+```
+
+- **FLAT 的含义**：候选区内计算是精确的暴力全算（不压缩向量），不像 `IVF_PQ`/`IVF_SQ8` 会量化损失精度——"索引加速 + 结果无损"的组合
+- 本项目：`nlist=1024`，检索 `nprobe=16` → 每次只搜全库 **16/1024 ≈ 1.5%** 的数据，毫秒级响应
+
+**③ 两个关键参数：nlist / nprobe**
+
+| 参数 | 含义 | 本项目取值 | 权衡 |
+|---|---|---|---|
+| `nlist` | 建库时分多少簇 | 1024 | 越大候选区越细，但建库慢 |
+| `nprobe` | 查询时搜几个簇 | 16 | 越大召回越全越慢；越小越快可能漏 |
+
+> 面试点：**nprobe 是精度与延迟的唯一旋钮**——它决定了"近似"的程度，比 nlist 更影响线上检索质量。
+
+**④ 为什么选 COSINE 度量**
+
+```
+cos(θ) = (query · 知识) / (|query| × |知识|)
+```
+
+- 本项目 Embedding（Qwen3-Embedding-0.6B）取 EOS hidden state 后已 **L2 归一化**，向量长度压成 1 → **余弦相似度 = 点积**，Milvus 计算快、索引友好
+- COSINE 只关心方向、不关心长度——语义相似度场景"方向一致 = 语义相近"（"温度过高"和"温度偏高"向量接近）
+- 归一化后 COSINE 与 L2 欧氏数学上等价（`|A-B|² = 2 - 2cos(A,B)`），但 COSINE 语义更直观
+
+**⑤ 两个集合共用同一套索引**
+
+| 集合 | 存什么 | 检索入口 | 额外标量过滤 |
+|---|---|---|---|
+| `knowledge` | 知识条目 | `KnowledgeVectorStore.search`（vector_store.py:211） | `device_type` / `fault_code` 表达式 |
+| `log_code` | 手册错误码 | `LogCodeVectorStore.search`（vector_store.py:509） | `device_type` / `error_code` 表达式 |
+
+两个 search 都支持 `expr` 标量过滤表达式（如 `device_type == "注塑机"`），实现"先按条件过滤候选、再向量精排"。
+
+**⑥ 为什么 score_threshold=0.0（全量召回）**
+
+向量路设 0 阈值全量召回，**不把相关性把关放在早期**——交给后面的 RRF 融合 + 加权重排 + 严格过滤统一处理，避免单路阈值误杀。召回层宁多勿漏，精排层再精修。
+
+**面试可背的一句话**：
+> "向量路用 Milvus IVF_FLAT + COSINE：建库时 KMeans 聚成 1024 个簇做倒排索引，查询时只进最近的 16 个簇暴力精排，只搜 1.5% 的数据；Embedding 已 L2 归一化所以余弦 = 点积；score_threshold=0.0 全量召回，相关性把关统一放到融合重排阶段。"
 
 ---
 
@@ -324,7 +561,7 @@ async def stream():
 
 **串味治理（检索层）**：问答模式检索后调用与专家模式同一套 `_filter_rerank_cases`：
 1. 过滤 `rrf_only` / 低分（score < 0.15）
-2. `weighted_rerank` 加权重排（故障词权重 0.4、设备不匹配压 0.15）
+2. `weighted_rerank` 加权重排（故障词权重 0.4、设备不匹配 ×0.2 压低）
 3. **严格过滤**：设备类型精确匹配 + 案例标题/正文至少命中一个故障关键词
 4. 严格过滤为空时回退宽松 top2，防止误伤导致"未检索到"
 
@@ -393,6 +630,27 @@ async def stream():
 - 拆解失败 / 无多故障 → 整体按单故障走 ReAct 检索
 - 检索失败 → 空案例，AnswerAgent 如实回答"未检索到"（不编造）
 
+#### 4.3.6 多轮会话引导（分析 + 引导，`ExpertRepairAgent`）
+
+> 专家模式在"拆解 + 分组分析"之上叠加了**多轮引导**：文件 `app/agents/expert_repair_agent.py`；端点 `POST /answer/expert`（首轮）+ `POST /answer/expert/step`（后续轮，SSE）。
+
+**首轮（`/answer/expert`）事件序列**：
+
+```
+thinking → answer(共因/关联分析 + 维修优先级) → references
+        → answer(分组五段式分析流, emit_done=False) → options(2-3 个方向) → done(携带 session_id)
+```
+
+**共因判定与优先级（对话中明确说出）**：LLM 基于各故障检索案例判断多现象是否**同根因**（如"油温高 + 锁模力不足 + 马达不转 ← 液压系统压力不足"），说明联动关系，并给出"先修哪个、为什么"；若共因解决后其他现象随之消失则直接结束（"一修带三好"）。
+
+**后续轮（`/answer/expert/step`）**：用户反馈执行结果 → 检索（初始问题 + 当前反馈）→ 注入首轮分析 + 会话历史 → LLM 判断"已解决 / 部分解决 / 未解决"→ 生成【分析】+ 2-3 个新方向（按优先级，第 1 个为推荐），不重复已排查方向；全部解决 → 输出维修总结结束。
+
+**会话与防膨胀**：Redis `expert_repair_session:{id}` 24h TTL；**30 步上限**；`chat_history` 超 25 条用 SessionSummarizer 增量压缩（保留最近 20 条原文，压缩失败保留原文）——与追踪维修同一套策略（详见 4.9）。
+
+**单故障边界**：拆解后只有 1 个故障时不做"共因"判定（无多现象可比），首轮退化为"单故障定位分析 + 优先级"——同样生成 2-3 个方向选项并创建会话，多轮引导逻辑不变。
+
+**面试点**：专家模式 = **问答 + 追踪的结合**——首轮给"真实案例的深度结论 + 排查入口"，后续像老师傅一样按反馈一步步带查；共因判定让多故障不重复修，方向选项带优先级推荐、用户可自选。
+
 ---
 
 ### 4.4 工单理解 Agent — `app/agents/ticket_agent.py`
@@ -419,22 +677,77 @@ async def stream():
     │   - completeness_score: 0-1（描述质量 + 字段填充率）
     │   - missing_fields: 缺失字段列表
     │   - validation_notes: 校验说明
-    │   - confidence: 综合置信度 0-1
     ▼
-输出 TicketAnalysisResult
+输出 TicketAnalysisResult → 主管/管理员审核确认
 ```
 
-#### 4.4.2 置信度驱动审批
+#### 4.4.2 工单审核流程（AI 回填 + 人工把关）
 
-| 置信度 | 处理 |
-|--------|------|
-| ≥ 0.8 | 自动审批通过 |
-| 0.5-0.79 | 转人工审核 |
-| < 0.5 | 必须人工审核（信息严重不足） |
+工单审核是"**AI 分析回填、自动收录，人做最终把关**"：
 
-#### 4.4.3 集成 LangFuse 追踪 + Redis 缓存
+```
+维修人员提交完成工单（complete）
+    │
+    ▼
+[1] AI 标准化分析（仅当字段为空时回填缺失的故障码/现象/根因/方案）
+    │
+    ▼
+[2] 自动提取知识（抽取 → 三层去重 → 发布 → 同步 Milvus）
+    │       知识收录是自动的：人工无需手动建知识条目
+    │
+    ▼
+[3] 主管/管理员人工把关（随时可退回 REJECTED）
+    │
+    ▼
+最终状态：COMPLETED（通过） / REJECTED（退回补充）
+```
 
-每次分析都打 trace，便于后续优化 prompt；相同 fault_description 走 Redis 缓存避免重复调用 LLM。
+- **为什么 AI 不自动放行**：维修工单是沉淀进知识库的数据源，一旦入库就会成为后续 AI 回答的依据——"错一条，污染一片"。所以最终把关权交给人（主管/管理员可通过 `REJECTED` 退回），AI 只负责把信息结构化、对空缺字段回填，降低人工核对成本。
+- **"补全"的真实含义**：`complete` 提交时仅当字段为空（`not work_order.fault_code` 等）才用 AI 标准化结果回填故障码/现象/根因/方案，**不覆盖已填写的字段**；`tags` 标签由 AI 提取后直接覆盖（`if analysis.tags: work_order.tags = analysis.tags`）。
+- **知识收录是自动的**：`_auto_publish_knowledge` 在提交完成时自动完成"抽取 → 三层去重 → 发布 → 同步 Milvus"，人工只在工单层面把关，不需要手动建知识条目；录入的知识条目标注 `source_type=WORK_ORDER` + `source_id` 可溯源回工单。
+
+#### 4.4.3 集成多后端追踪（RAGFlow 默认）+ Redis 缓存
+
+每次分析都打 trace（`app/core/langfuse_tracer.py` 统一抽象层，支持 RAGFlow / LangFuse / local 三种后端，`TRACING_BACKEND=ragflow` 默认，不可达自动降级 local 不影响业务）。
+
+**先说清楚 RAGFlow 的定位（避免误解）**：RAGFlow 本职是 **RAG 平台**（文档处理 → 知识库 → 检索 → 问答），**不是追踪工具，它没有任何 LLM 可观测性功能**。本项目的"用 RAGFlow 做追踪"准确说法是：**复用了它的知识库能力**——把 trace JSON 当"文档"通过 REST API 上传到独立数据集 `ticket_traces`，用它的 Web 界面查看回放。相当于把它当 **trace 存档 + 回放库** 用（够用的下限），而不是当专业追踪平台用。
+
+**RAGFlow 复用的能力边界**：
+
+- ✅ 能做到（本项目实际使用）：trace 存档、Web 查看、按 trace_id 回放、失败降级本地日志
+- ❌ 做不到（它没有这些概念）：trace 树 / span 嵌套、token 用量与成本统计、评估指标、性能告警、Prompt 版本管理——这些是 LangFuse 等专业 LLM 可观测性平台的职责
+
+**为什么要加追踪**：一次问答链路很长（检索案例 → 记忆 → 生成 → 打分），纯日志还原不了"现场"——不知道当时问了什么、检索到哪些案例、模型回了什么、每步耗时多少。追踪给 LLM 调用做**业务级可观测性**：可回放、可排查、可评估回答质量。
+
+**在项目中起什么作用**：
+
+- 打点：`tracer.trace()` 自动记录 trace_id、事件流（enter/exit）、generation（prompt/response）、耗时、评分（score）
+- 落库：trace 以 `trace_{id}.json` 文档上传 RAGFlow 独立数据集 `ticket_traces`（`permission=me`），与业务知识库物理隔离，**不参与检索、不污染知识库**
+- 查看：登录 RAGFlow Web 界面回放每次问答完整链路
+- 降级：RAGFlow 不可达自动降级本地日志，追踪挂掉不影响业务
+
+**为什么复用 RAGFlow 而不是引入 LangFuse**（外包交付视角）：
+
+- **客户硬性要求私有化**：工单、维修数据是工厂生产数据，客户不接受数据上公有云 → LangFuse 云这类 SaaS 直接排除
+- **RAGFlow 本来就是交付方案的一部分**：系统要做 RAG 检索（问答查维修案例库），RAGFlow 已部署在**客户服务器**上，追踪只是多上传一种文档，交付清单零新增
+- **两套原型交付让复用价值翻倍**：每多一个独立组件，每套客户环境都要部署/升级/排障，售后成本翻倍；复用已有组件是交付和售后的最优账
+- **多工厂场景天然匹配多租户**：RAGFlow 租户隔离对应不同工厂/账号，trace 归属清晰
+- **可替换不锁死**：`TRACING_BACKEND` 一键切换 RAGFlow / LangFuse / local，业务代码无感知
+- **取舍**：复用方案只能做到"存档 + 回放"，没有 token 成本、评估指标等分析能力；当前需求（出问题能回放排查）够用，将来需要分析能力就切 LangFuse
+
+**面试话术（一句话带过版）**：
+
+> "每次分析调用都打 trace，走统一追踪抽象层（RAGFlow 默认、不可达自动降级本地日志）。注意：RAGFlow 本职是 RAG 平台，我们只是复用它的知识库存 trace 文档、Web 回放，不是拿它当专业追踪工具；专业分析（成本、评估）当前不需要，架构留了 `TRACING_BACKEND` 一键切换 LangFuse 的后路。"
+
+**追问应对速查**：
+
+| 追问 | 答法 |
+|---|---|
+| "RAGFlow 不是做 RAG 的吗，怎么当追踪用？" | 对，它本职是 RAG。我们不是拿它做追踪，是复用它的知识库存 trace 文档 + 界面回放——当存档库用 |
+| "那为什么不直接用 LangFuse？" | 复用交付里已有的组件零新增；LangFuse 要每套客户环境新部署，售后成本翻倍；且架构可切换，需要时再切 |
+| "RAGFlow 能分析成本、评估吗？" | 不能，它没有这些功能；我们只用了存档 + 回放，分析需求当前没有，将来切 LangFuse |
+| "数据安全怎么保证？" | 全程私有化，部署在客户服务器，数据不出内网——这是客户的硬性要求也是交付前提 |
+| "trace 会污染知识库吗？" | 不会，`ticket_traces` 是独立数据集，与业务知识库物理隔离，不参与检索 |
 
 ---
 
@@ -449,8 +762,11 @@ async def stream():
 #### 4.5.2 会话管理
 
 - `session_id` 由 UUID 生成
-- 会话状态存 Redis（24h TTL）
-- 长对话用 `SessionSummarizer` 压缩成结构化摘要，避免上下文超长
+- 会话状态存 Redis（`guided_repair_session:{id}`，24h TTL），Redis 不可用时降级内存缓存
+- **30 步上限**（`MAX_STEPS`）：超过自动生成总结结束，长故障/复合故障也能引导到底
+- **闲聊拦截**：与维修无关的消息不进排查会话（`_is_repair_irrelevant` 关键词白名单），回复固定引导语
+- **会话过期提示**：加载不到会话明确提示"会话不存在或已过期，请重新开始"，不静默出错
+- 长对话用 `SessionSummarizer` **增量压缩**成结构化摘要：`chat_history` 超 25 条 → 最旧部分并入 `history_summary`，保留最近 20 条原文（详见 4.9.4）
 
 #### 4.5.3 异步流式实现
 
@@ -517,7 +833,7 @@ eos_embeddings = F.normalize(eos_embeddings, p=2, dim=1)
 
 #### 4.7.2 模型加载策略
 
-1. 优先本地路径 `D:\models\Qwen\Qwen3-Embedding-0___6B\...`
+1. 优先本地路径 `D:\models\Qwen\Qwen3-Embedding-0___6B\models\qwen--Qwen3-Embedding-0.6B\snapshots\master`
 2. 回退 HuggingFace，环境变量 `HF_ENDPOINT=https://hf-mirror.com`（国内镜像）
 3. 设备自动选择 `cuda` / `cpu`
 4. CPU 用 `float32`，CUDA 用 `bfloat16`
@@ -555,7 +871,7 @@ eos_embeddings = F.normalize(eos_embeddings, p=2, dim=1)
 ```
 
 **为什么 IVF_FLAT 而不是 HNSW**：
-- IVF_FLAT 精度更高（无近似），适合工单库规模不大（538 条）的场景
+- IVF_FLAT 精度更高（无近似），适合工单库规模不大（seed 数据 200 条起步）的场景
 - HNSW 召回更快但内存占用大，工单库规模上来后再切换
 - `nlist=1024` 是经验值，建议 `nlist = sqrt(N) ~ 4*sqrt(N)`
 
@@ -571,13 +887,14 @@ eos_embeddings = F.normalize(eos_embeddings, p=2, dim=1)
 
 ### 4.9 会话管理 — `app/agents/session_agent.py` + `app/api/session.py`
 
-#### 4.9.1 三层会话存储
+#### 4.9.1 会话存储与摘要
 
 | 层 | 存储 | TTL | 用途 |
 |----|------|-----|------|
-| 活跃会话 | Redis | 24h | 实时对话上下文 |
-| 历史会话 | PostgreSQL | 永久 | 审计 + 持久化 |
-| 长对话摘要 | Redis | 24h | 超长对话压缩后存 |
+| 活跃会话 | Redis | 24h | 追踪维修 / 专家模式的实时对话上下文（`_SESSION_TTL = 24 * 3600`） |
+| 钉钉用户映射 | Redis | 24h | staff_id → session_id 映射，跨班次隔离 |
+| 历史会话 | 前端 localStorage | 永久 | 前端会话列表持久化（`saveSessions`，含 `_expertSessionId`） |
+| 长对话摘要 | 按需生成 | - | 前端调 `/summarize` 即时压缩 / 后端保存时增量压缩，不占 Redis 长期空间 |
 
 #### 4.9.2 SessionSummarizer 输出格式
 
@@ -598,6 +915,47 @@ eos_embeddings = F.normalize(eos_embeddings, p=2, dim=1)
 
 **为什么压缩**：LLM 上下文窗口有限（DeepSeek 64K），长对话超过窗口后无法继续，用摘要压缩能保持上下文连贯性。
 
+#### 4.9.3 分场景会话策略（核心）
+
+会话管理按"需要多少上下文"分档，**只在需要上下文的场景花存储和 token**：
+
+| 入口 | 状态 | 存储 | 核心策略 |
+|---|---|---|---|
+| 智能问答 `/answer/stream` | **无状态** | — | 一次一答，不建会话、不存历史（快、稳、可并发） |
+| 追踪维修 `/guided-repair/chat` | 有状态 | Redis `guided_repair_session:{id}` | 24h TTL、**30 步上限**、闲聊拦截、后端增量摘要压缩 |
+| 专家模式 `/answer/expert` + `/expert/step` | 有状态 | Redis `expert_repair_session:{id}` | 24h TTL、**30 步上限**、首轮建会话 + 后续引导、后端增量摘要压缩 |
+| 钉钉/MCP 追踪维修 | 有状态 | Redis `mcp/staff_guid:session:{staffId}` | staff→session 映射、24h 无对话自动开新会话、跨班次/跨天隔离 |
+
+**为什么智能问答无状态**：问答是"一次性长回答"（五段式分析），语义由单次检索决定，不需要上下文；无状态 → 天然可并发、不占存储。有状态的两者（追踪/专家）都是**多轮交互依赖历史**（引导排查必须知道前面查了什么），必须带上下文。
+
+#### 4.9.4 两层压缩（防止历史无限膨胀）
+
+**① 前端压缩**：每个前端会话消息数达到 `COMPRESS_BATCH` 后，最旧的 user/assistant 消息调 `/session/summarize` 压缩成一条 `summary` 消息（问答/专家模式，追踪模式除外）。
+
+**② 后端增量压缩**（GuidedRepairAgent / ExpertRepairAgent 各自的 `_maybe_compress_history`，保存会话时触发）：
+- `chat_history` 超过 **25 条** → 最旧的 `(len-20)` 条与已有 `history_summary` 一起交给 SessionSummarizer 生成新摘要，会话只保留最近 **20 条原文**
+- **增量式**：每次只压最旧部分，不重复压缩
+- **压缩失败保留原文**（安全兜底，绝不让会话因压缩崩溃丢历史）
+
+#### 4.9.5 三层上下文注入（有状态 Agent 通用）
+
+```
+[首轮分析/初始问题] + [已压缩的历史摘要 history_summary] + [最近 N 条原文] → 拼成 prompt
+```
+
+保证长会话下 LLM 仍能感知全局上下文，又不超 token。
+
+#### 4.9.6 会话结构对比
+
+| Agent | 会话内容 | 结束条件 |
+|---|---|---|
+| GuidedRepairAgent | device_type / initial_symptoms / chat_history / step_count / status | 用户反馈"解决"或 30 步上限 |
+| ExpertRepairAgent | initial_question / sub_queries / faults / **first_analysis（首轮共因分析）** / chat_history / step_count | LLM 判定全部解决（all_resolved）或 30 步上限 |
+
+#### 4.9.7 面试一句话总结
+
+> "会话管理按上下文需求分档：问答无状态不花存储；追踪维修/专家模式有状态（Redis 24h + 30 步 + 后端增量摘要压缩 + 三层上下文注入）；钉钉在其上叠加 staff→session 映射做跨班次隔离；前端再做 localStorage 持久化 + 摘要压缩——前端压缩、后端压缩、步数上限三防线防止历史膨胀。"
+
 ---
 
 ## 5. 数据模型与存储设计
@@ -609,7 +967,10 @@ eos_embeddings = F.normalize(eos_embeddings, p=2, dim=1)
 | `User` | id, username, role, dingtalk_user_id, phone |
 | `Device` | id, name, model, device_type, location, status |
 | `WorkOrder` | id, wo_no, device_id, fault_description, fault_code, status(enum), priority, assignee_id, created_at |
-| `KnowledgeItem` | id, title, content, device_type, fault_code, fault_tags(JSON), status(enum: draft/published) |
+| `KnowledgeItem` | id, title, content, device_type, fault_code, fault_tags(JSON), status(enum: draft/published), source_type, source_id |
+| `ManualCodeEntry` | id, error_code, title, description, causes, solutions, manual_name, chapter, page（手册错误码权威库） |
+| `WorkOrderProgressLog` | id, work_order_id, from_status, to_status, operator_id, source（工单状态流转留痕） |
+| `FaultCodeMapping` | id, code, name, device_type, category（故障码映射） |
 | `SparePart` | id, part_name, part_code, specification, stock_quantity, safety_stock, location |
 | `DutySchedule` | id, user_id, date, shift, role |
 | `LeaveRequest` | id, user_id, start_date, end_date, type, status |
@@ -643,24 +1004,26 @@ op.execute("ALTER TYPE workorderstatus ADD VALUE IF NOT EXISTS 'IN_PROGRESS'")
 ### 6.1 Docker Compose 编排
 
 ```yaml
-# docker-compose.dev.yml
+# docker-compose.yml（start_all.ps1 一键启动使用；docker-compose.dev.yml 额外带 Attu 管理 UI）
 services:
-  postgres:    # v16, port 5432
-  redis:       # v7, port 6379
-  etcd:        # v3.5, Milvus 元数据
-  minio:       # v2024, Milvus 对象存储, port 9000
-  milvus:      # v2.4, port 19530 / 9091
+  postgres:    # v16, 宿主机 ${DB_PORT:-15432}:5432
+  redis:       # v7, 宿主机 ${REDIS_PORT:-7379}:6379
+  etcd:        # v3.5.5, Milvus 元数据
+  minio:       # 2025-02-28, Milvus 对象存储, 宿主机 ${MINIO_PORT:-9000}:9000 / 控制台 9001
+  milvus:      # v2.4.15, 宿主机 ${MILVUS_PORT:-19530}:19530 / REST 9091
 ```
 
 ### 6.2 启动顺序
 
-1. Docker 拉起基础设施容器
+1. Docker 拉起基础设施容器（`docker compose -f docker-compose.yml up -d`）
 2. `alembic upgrade head` 执行数据库迁移
 3. `python scripts/sync_vectors.py` 同步 PG 知识到 Milvus
 4. `python scripts/seed_data.py` 灌种子数据（可选）
-5. `uvicorn app.main:app --reload` 启动后端
+5. `uvicorn app.main:app --host 0.0.0.0 --port 18080` 启动后端
 6. lifespan 预热 Embedding 模型
-7. `npm run dev` 启动前端
+7. `npm run dev` 启动前端（Vite 端口 4173）
+
+> 一键启动：项目根目录 `start_all.ps1`（端口冲突检查 + Docker + 后端 + 前端一起拉起）
 
 ### 6.3 关键环境变量（`.env`）
 
@@ -670,54 +1033,112 @@ DEEPSEEK_MODEL=deepseek-chat
 MILVUS_HOST=localhost
 MILVUS_PORT=19530
 MILVUS_COLLECTION=knowledge
+MILVUS_LOG_CODE_COLLECTION=log_code   # 手册错误码向量集合
 MILVUS_VECTOR_SIZE=1024
 DB_HOST=localhost
-DB_PORT=5432
+DB_PORT=15432                 # 宿主机映射端口（容器内 5432）
 DB_USER=admin
 DB_PASSWORD=admin123
 DB_NAME=maintenance_db
 REDIS_HOST=localhost
-REDIS_PORT=6379
+REDIS_PORT=7379               # 宿主机映射端口（容器内 6379）
 HF_ENDPOINT=https://hf-mirror.com   # 国内镜像，避免 HF 下载超时
 HF_HUB_OFFLINE=1                    # 模型已下载后开启，跳过在线检查
 DINGTALK_MOCK_MODE=false            # 钉钉真实模式
+TRACING_BACKEND=ragflow             # 追踪后端：ragflow | langfuse | local
+BACKEND_PORT=18080                  # FastAPI 监听端口
 ```
 
 ---
 
-## 7. 踩过的坑与解决方案
+## 7. 项目进行中遇到的问题与解决方案
 
-> 这部分是面试加分项，能证明你不是"调包侠"，是真踩过坑的工程师。
+> 面试被问"项目踩过什么坑 / 遇到过什么问题"时，**只讲这三个**——它们是项目演进的三条主线（检索策略设计 / ReAct 检索 / 知识闭环），每个都讲清"为什么这么设计 + 踩过什么坑 + 解决了什么"，比零散的环境坑更能体现工程深度。对应话术见 Q3（检索策略总纲）/ Q25（ReAct）/ Q26（知识闭环）。
 
-### 7.1 依赖冲突类
+### 7.1 RAG 检索策略的设计（为什么这么设计 + 解决了什么）
 
-1. **(1) `fastmcp` 与旧栈冲突**：fastmcp 3.4.5 要求 starlette/pydantic/httpx 高版本，与项目 fastapi 0.109.0 + pydantic <2.6 + langchain 0.1.20 根本性冲突。**解决**：移除 fastmcp，MCP 功能注释掉（项目本来就是可选功能）。
-2. **(2) `langsmith` ForwardRef 错误**：Python 3.12 下 `ForwardRef._evaluate() missing 'recursive_guard'`。**解决**：升级 langsmith 到 0.1.147。
-3. **(3) `setuptools 83` 删了 `pkg_resources`**：**解决**：降级到 setuptools 79.0.1。
+**设计目标**：维修员用大白话描述故障（"3号注塑机锁模力不够"、"电机嗡嗡响"）也能命中历史案例；同时故障码/设备型号（SV0436、E3091）这种字面精确的内容能精准命中权威处理方案。
 
-### 7.2 检索准确率类
+**① 为什么向量（余弦）+ 关键词（BM25）混合，缺一不可**
+- **背景**：开发过程中用真实工单验证检索，翻车了两次——
+  1. 维修员搜"注塑机嗡嗡响"，结果页返回一堆"温度高""锁模力不足"的案例，就是没有异响。查日志发现：向量路能理解"嗡嗡响"≈"异响"（语义对上了），但"嗡嗡响"三个字在知识库标题里根本没出现过，BM25 关键词路直接 0 命中——口语词和标题词对不上，单靠语义路就召回不全。
+  2. 按故障码搜"SV0436"——向量路把它当成普通语义 token 匹配，召回的全是"伺服、报警"这类语义沾边但无关的泛案例，精确的故障码反而被语义稀释、命中不了。
+- **向量擅长语义近似**："嗡嗡响"能匹配"马达异响"，"锁模力不够"能匹配"锁模压力不足"——解决"表述不同、意思相同"的召回
+- **BM25 擅长字面精确**："SV0436"、"SIEMENS 840D"这种标识，向量编码后语义信息被稀释，必须逐字命中——解决"精确标识"的召回
+- 结论：一个管"意思"、一个管"字面"，**缺一个就有盲区**，所以混合是设计起点，不是功能堆叠。
 
-1. **(1) Embedding API Key 空 → SHA-256 fallback**：早期没配 API Key，库自动降级为 SHA-256 哈希向量，导致相似度分数随机。**解决**：改用本地 Qwen3-Embedding，彻底不依赖 API Key。
-2. **(2) 同会话上下文复用 → 检索污染**：用户在同一会话里连续提问，第二次检索带了第一次的上下文导致结果跑偏。**解决**：每次检索都创建独立会话，强制上下文隔离。
-3. **(3) SQL 缺 ORDER BY + LIMIT → 结果被截断**：BM25 查询没排序直接 LIMIT，导致相关工单被排除。**解决**：所有 BM25 查询强制 `ORDER BY score DESC, id DESC LIMIT :limit`。
-4. **(4) SQLite LIKE 优先级问题**：早期用 SQLite，`OR` 优先级低于 `AND`，复合条件出错。**解决**：每个 LIKE 条件加显式括号 `(title ILIKE :kw OR content ILIKE :kw)`。后迁移到 PG 后保留这个习惯。
-5. **(5) RRF 去重用错键**：向量路返回 UUID id，BM25 路返回整数 id，用 id 去重导致同条工单双路命中分不合并。**解决**：统一用 `knowledge_id` 做合并键，并对不一致情况打 WARNING。
-6. **(6) pymilvus API 变更**：`hit.entity.get("field", "")` 报错"takes 2 positional arguments but 3 were given"。**解决**：改为 `hit.entity.get("field") or ""`。
-7. **(7) 多故障提问检索串味**：专家模式测试"主轴过热 + 换刀故障 + X 轴过载"时，故障小节引用了黑屏、输送设备电机过热等跨设备/泛相似案例。根因：ReAct 第一轮选向量且达标即早停（混合检索名存实亡）+ 0.15 阈值太松。**解决**：① `require_hybrid` 首轮强制 vector+BM25 双路；② `_filter_rerank_cases` 设备精确匹配 + 故障关键词命中严格过滤（空结果回退宽松 top2 防误伤）；③ 问答模式检索前规则预检多故障，推送 `suggest_expert` 提示一键切专家模式。
+**② 为什么用 RRF 融合，而不是加权平均**
+- **背景**：开发过程中先试的是加权平均融合（vector×0.5 + bm25×0.5），实测同一批 query：BM25 加权分能到几十、向量余弦只有 0.8，直接加权后向量分被完全淹没，排序被 BM25 大数值主导，双路都命中的案例反而排不上去。
+- RRF 只看名次（`Σ 1/(60+rank)`），天然规避量纲；**双路都认同的条目排最前**（同一知识两路命中分叠加），这是 RRF 的核心价值
+- k=60 是平滑参数，让名次差不过分悬殊
 
-### 7.3 异步并发类
+**③ 融合怎么落地（双库最多四路）**
+- **双库四路**：**背景**——开发过程中接入手册库后，用"ALM-6401"实测发现走不到手册权威答案，因为知识库里根本没有这条记录。**设计**：知识库两路（向量 + BM25）总是走；问题含错误码（正则提取，零 LLM）时增开手册库两路（错误码精确 + 手册语义），最多四路
+- **去重键**：**背景**——开发过程中第一次发现同一条工单双路都命中，结果里却出现两条一模一样的卡片（按 Milvus UUID / PG int 分开当了两条）；手册库加入后再次发现知识 5 号和手册 5 号被合并成一条、条目丢失。**设计**：`_dedup_key`（`K:{id}` / `M:{id}`）> `knowledge_id` > `id`——先统一两路口径，再隔离双库撞号
+- **错误码置顶**：**背景**——开发过程中实测"SV0436"提问，精确命中的手册条目（score=1.0）排在第 5 位，被双路命中的泛相似案例压在下面。**设计**：融合过滤后按 `method == manual_code_exact` 置顶
+- **严格过滤**：**背景**——见 ④ 多故障串味。**设计**：设备精确匹配 + 故障词命中（剔除跨设备/泛相似案例），空结果回退宽松 top2 防误伤
 
-1. **(1) `koa-connect` 包装同步中间件导致 ctx 泄漏**：早期前端中间件用 Koa，后端中间件是 Express 风格，用 koa-connect 包装后 ctx 在异步回调里丢失。**解决**：原生 Koa 重写所有中间件。
-2. **(2) 同步调用异步 Agent 方法**：在 LangGraph 条件路由里同步调 `agent.execute()` 导致返回的是 coroutine 对象而不是结果。**解决**：用 `asyncio.run()` 或改成同步方法。
-3. **(3) 并行 Agent 同名 key 冲突**：早期多 agent 并行执行时用类名做结果 key，相同类名导致结果被覆盖。**解决**：用唯一 domain 标识符做 key。
+**④ 这套设计解决了项目进行时的哪些坑（= 设计动机的反面教材）**
+- **"AI 答非所问"（准确率 30%）**：背景——开发过程中用 50 条真实工单提问验证，答案驴唇不对马嘴。根因是单路召回盲区 + 分数量纲乱加 → 混合 + RRF 解决"召不全、排不对"
+- **多故障提问串味**：背景——开发过程中用"主轴过热 + 换刀故障"复合提问测试，故障小节引用了黑屏、输送设备电机过热等无关案例 → 严格过滤 + 规则预检切专家模式
+- **故障码权威答案排不上去**：背景——开发过程中按错误码提问，权威手册条目排在泛案例后面 → 置顶修正
+- **双库融合丢条目/张冠李戴**：背景——开发过程中接入手册库后知识库出现条目缺失/内容错配 → 复合去重键
 
-### 7.4 部署运维类
+**⑤ 一句话总结（可背）**：召回定"有没有"（向量+BM25 互补，一个管语义一个管字面）、融合定"排序对不对"（RRF 只看名次，双路认同的排最前）、过滤定"噪声别进来"（设备/故障词严格校验）——四层配合，检索准确率从 30% 提到 85%。对应话术见 Q3。
 
-1. **(1) HuggingFace 下载超时**：`WinError 10060`。**解决**：设 `HF_ENDPOINT=https://hf-mirror.com`，并用 Python `requests` 直接下载，绕过 `huggingface_hub` 库问题。
-2. **(2) 端口被 Hyper-V/WSL 保留段圈走（`WinError 10013`）**：Windows 每次开机随机保留一段端口（如 2644-3243），被圈走的端口任何程序都绑不上。**解决**：项目端口已统一迁移到 18080（后端）/ 4173（前端）；若再冲突，管理员运行 `.\fix_winnat_ports.ps1` 把 WinNAT 动态端口固定到 50000+（Set-NetNat + 重启 winnat），一劳永逸；或直接运行 `.\start_all.ps1` 一键修复+启动。
-3. **(3) Alembic 重复迁移**：`psycopg2.errors.DuplicateTable`。**解决**：drop schema 重建，用 `Base.metadata.create_all()` + `alembic stamp head`。
-4. **(4) Alembic ALTER TYPE 报错**：`ALTER TYPE` 不支持 `IF NOT EXISTS`。**解决**：迁移脚本改成 `ADD VALUE IF NOT EXISTS`。
-5. **(5) cpolar 内网穿透配置**：钉钉 OAuth 回调需要公网 URL。**解决**：cpolar 隧道转发到 localhost:18080（后端），把回调 URL 配到钉钉开放平台；**cpolar 免费版重启后域名会变**，需同步更新 `backend/.env` 的 `DINGTALK_REDIRECT_URI` / `SERVER_PUBLIC_URL` 和钉钉后台回调地址。
+### 7.2 ReAct 检索 Agent（从固定检索到自主深挖）
+
+**设计目标**：固定混合检索"一步到位"，但复杂/模糊提问一次检索召回不足（词不达意、表述不专业），需要 Agent 自主决定"换路检索、改写查询、补查条件"，多轮深挖直到质量达标。
+
+**① 为什么从固定检索演进到 ReAct（而不是继续写死）**
+- **背景**：开发过程中用模糊提问测试知识搜索页，用户问"3号机组怪响，查一下"这种大白话，一次检索结果不足或无关——查日志发现固定链路的路数（两路 → RRF → 过滤）编译时就定死了，结果不足时不会自己改写查询、不会换路，只能把次优结果原样返回。
+- 固定检索的路数编译时就定了，结果不足时不会深挖
+- 模糊提问（"3号机组怪响，查一下"）该走向量还是 BM25？该不该补设备/故障码条件？——这些决策依赖语义理解，规则写不全 → 交给 LLM 每轮决策，行动空间限定 6 个枚举动作（vector / bm25 / conditional / graph / rewrite / finish），避免 LLM 幻觉出不存在的工具名
+
+**② 为什么用确定性步骤兜底（LLM 决策不能裸奔）**
+- **require_hybrid 首轮强制双路**：**背景**——开发过程中跑检索日志做回归测试，发现第一轮 LLM 几乎总选 vector 且质量达标就 finish，BM25 路从未真正参与，"混合检索"名存实亡。**设计**：首轮确定性执行 vector+BM25，达标直接 RRF，不达标才进决策循环
+- **质量判定用规则不调 LLM**：**背景**——开发过程中早期质量判定也调 LLM，一次检索额外多出 1~N 次 LLM 调用，延迟翻倍且判定不稳定（同样的结果有时判达标有时判不足）。**设计**：质量本质是客观的"数量 + 分数"（≥3 条且 ≥2 条高分或最高分 ≥0.7），规则快、稳、零成本
+- **temperature=0.1 + MAX_ITERATIONS=5 + 规则兜底**：**背景**——开发过程中压测时出现过 LLM 决策连续失败、检索直接返回空结果的事故（坏一轮就全崩）。**设计**：低温度保决策可复现、硬上限防死循环、LLM 挂了检索不崩（首轮 vector / 不足 rewrite / 否则 finish）
+
+**③ 怎么落地**
+- 跨轮结果按 `knowledge_id` 去重累积（只增不覆盖），多轮搜到的新案例都保留
+- scratchpad 记录每轮思考/行动/观察，作为可观测性输出（调试用）
+- 专家模式多故障时各子查询并行跑 ReAct：`asyncio.gather + wait_for(90s)` 整体超时，单点失败对该故障降级，不拖垮整体回答
+
+**④ 这套设计解决了开发过程中踩的哪些坑**
+- 混合检索名存实亡（首轮早停）→ require_hybrid 兜下限
+- 复杂提问召回不足、不会深挖 → 改写查询 + 换路补查
+- LLM 决策失败 / 卡死 → 规则兜底 + 超时降级
+
+**⑤ 一句话总结（可背）**：固定检索是"一步到位"，ReAct 是"按需深挖"——LLM 决策选路 + 规则兜底稳下限 + 硬上限防失控。代价是慢（多轮 LLM），所以只有知识搜索页和专家模式用，智能问答走固定混合（快、稳）。对应话术见 Q25。
+
+### 7.3 工单 → 知识沉淀闭环（数据飞轮）
+
+**设计目标**：知识库不靠人工维护——每次维修完成自动变成一条可检索知识；同时保证知识库不被重复条目污染（重复会稀释检索、霸榜）。
+
+**① 为什么做自动闭环**
+- **背景**：开发过程中知识库靠人工把工单转成知识——验收时抽查发现大量高频故障在知识库里没有对应条目（修完没人沉淀）；新设备接入没有历史案例，AI 直接说"未检索到"。老师傅离职后经验跟着流失。
+- 人工维护知识库的痛：冷启动难（新设备没案例）、更新慢（修完忘了沉淀）、老师傅离职经验流失
+- 工单完成（ARCHIVED）即触发：抽取 → 去重 → 发布 → 同步 Milvus，形成"维修 → 知识 → 检索 → 再维修"的数据飞轮
+
+**② 为什么去重用"相似度筛候选 + LLM 判实质"，而不是相似度阈值直接判**
+- **背景**：开发过程中最早用标题相似度阈值直接判重，测试时把"注塑机温度高-加热器坏"和"注塑机温度高-温控器漂移"两条不同原因的知识误判为重复拒收；人工复核时发现误杀率很高，有价值案例进不了库。
+- 维修场景的核心矛盾：同设备同故障码可能**不同原因和方案**——相似度高 ≠ 重复
+- 直接按相似度判重会误杀有价值案例，且误杀不可逆（好知识永远进不了库）
+- 所以分层：相似度只筛候选（便宜、可召回），LLM 对比"故障原因 + 处理方案"判实质（贵、准确）——原因和方案都相同才算真重复
+
+**③ 怎么落地（三层去重链 + 护栏）**
+- **三层去重链**：**背景**——开发过程中发现纯故障码精确判重漏掉"标题改写但实质相同"的重复（同码不同措辞，如"电源模块保险丝熔断" vs "保险丝熔断处理"）。**设计**：故障码精确快路径（`fault_code LIKE`，零成本）→ 向量召回（`score_threshold=0.45`）→ 相似度 **≥ 0.55** 调 DedupAgent（LLM）
+- **幂等护栏**：**背景**——开发过程中测试时发现前端重复提交完成工单（或事件重放），同一工单被抽取两次，知识库出现完全相同的两条。**设计**：`source_type + source_id` 幂等
+- **发布即同步**：**背景**——开发过程中知识审核通过入库后检索搜不到，排查发现 Milvus 向量没同步。**设计**：`_sync_to_milvus` 发布即同步，新增知识立即可检索
+- **保守不判重**：**背景**——开发过程中 DedupAgent 判定失败（JSON 解析异常/LLM 超时）时，若默认判重复会误杀好知识。**设计**：失败降级"保守不判重复"（宁可多收一条，不可误杀）
+
+**④ 这套设计解决了开发过程中踩的哪些坑**
+- 知识库重复污染（重复条目霸榜、稀释检索）→ 三层去重链
+- 同单重复提取（事件重放/重复提交）→ 幂等护栏
+- 知识入库但检索不到（向量不同步）→ 发布即同步
+
+**⑤ 一句话总结（可背）**：闭环解决"知识从哪来"（自动沉淀），去重链解决"知识干不干净"（规则快路径省成本 + 向量筛候选 + LLM 判实质），护栏保证"宁可多收不可误杀"。0.45/0.55 的取值论证见 Q26 ⑤。
 
 ---
 
@@ -736,14 +1157,17 @@ DINGTALK_MOCK_MODE=false            # 钉钉真实模式
 2. **(2) 支持 JSON 元数据字段**，可以把 title/content/device_type/fault_code/fault_tags 直接存进 Milvus，检索时一次性返回，不需要回查 PG
 3. **(3) 分布式架构**（etcd + MinIO），未来扩到亿级向量不需要换技术栈
 4. **(4) pgvector 作为 fallback 保留**，配置里可切换，应对 Milvus 不可用的场景
+5. **(5) 本项目具体用法**：`knowledge` / `log_code` 两个集合共用 `IVF_FLAT + COSINE` 索引（nlist=1024，检索 nprobe=16，详见 4.1.8）——中小数据量下 IVF_FLAT 参数直观、结果无损，是性价比选择
+6. **(6) 支持标量过滤表达式**（`expr`）：向量检索时可叠加 `device_type == "注塑机"` 这类过滤，实现"先按条件过滤候选、再向量精排"，这是 pgvector 早期版本不具备的
 
 Faiss 不选是因为它是库不是服务，没有持久化、没有高可用，需要自己包装。
+> 追问补充：**"为什么不用 HNSW？"**——HNSW 图索引查询更快但内存占用大；本项目数据量级（千级~万级）下 IVF_FLAT 足够，且 `nprobe` 旋钮直观可调。百万级再切 HNSW（见 Q19）。
 
 ---
 
 ### Q3：你的 RAG 检索策略是怎么设计的？（检索策略总纲：召回 → 融合 → 过滤 → 验证，高频必问）
 
-**A**：我的检索策略不是一步到位的，是上线后被真实问题逼着演进成"**召回 → 融合 → 过滤 → 验证**"四个阶段，每个阶段解决一类问题、职责单一。
+**A**：我的检索策略不是一步到位的，是开发过程中被真实问题逼着演进成"**召回 → 融合 → 过滤 → 验证**"四个阶段，每个阶段解决一类问题、职责单一。
 
 **① 召回层（解决"召不全"）——双库最多四路**
 - 知识库双路：Milvus 向量（语义近似）+ PG BM25（关键词精确）。故障码/设备型号这种字面内容，向量反而会失真，必须 BM25 兜底（为什么必须混合见 Q5）
@@ -758,7 +1182,7 @@ Faiss 不选是因为它是库不是服务，没有持久化、没有高可用�
 
 **③ 过滤层（解决"噪声别进来"）——阈值 + 加权重排 + 严格过滤**
 - 通用过滤：score ≥ 0.15 + 剔除 `rrf_only`（只有 BM25 命中、无语义匹配的不可信）（阈值怎么定见 Q24）
-- `weighted_rerank` 加权重排：故障词权重 0.4、设备不匹配 ×0.15 压低
+- `weighted_rerank` 加权重排：故障词权重 0.4、设备不匹配 ×0.2 压低
 - 问答/专家模式叠加**严格过滤**：设备精确匹配 + 故障词至少命中一个，剔除跨设备案例（"数控机床主轴过热"误召回"输送设备电机过热"）和同设备泛相似案例（"黑屏"）
 - **坑3（串味）**：早期"单路向量 + 阈值太松 + 没有设备/故障维度校验"，多故障提问"主轴过热还有换刀故障"会混入黑屏、输送设备电机过热等无关案例 → 治理过程详见 Q22
 - **坑4（权威条目名次吃亏）**：错误码精确命中（score=1.0）只在一路出现，RRF 按名次算排不过双路命中的泛相似案例 → 融合过滤后按 `method == manual_code_exact` 置顶
@@ -879,14 +1303,15 @@ WebSocket 适合双向实时通信（如聊天室），AI 问答场景用 SSE �
 
 ---
 
-### Q13：你的工单理解 Agent 怎么驱动自动审批？
+### Q13：你的工单审核流程是怎样的？AI 和人工各负责什么？
 
-**A**：基于置信度评分：
-- `>= 0.8`：信息完整、分类明确，自动审批通过
-- `0.5-0.79`：信息基本可用但需人工确认
-- `< 0.5`：信息严重不足，必须人工审核
+**A**：工单审核是"**AI 分析回填、自动收录，人做最终把关**"：
 
-置信度由信息完整度（字段填充率）+ 描述清晰度 + 分类确定性综合计算。LLM 一次调用同时输出标准化字段、分类、校验、置信度，避免多次调用。
+1. 维修员提交完成工单 → AI 标准化分析（仅当字段为空时回填缺失的故障码/现象/根因/方案）
+2. 自动提取知识 → 三层去重 → 发布 → 同步 Milvus（知识收录是自动的，人工不建知识条目）
+3. 主管/管理员随时可退回（REJECTED）把关，最终状态 COMPLETED（通过）或 REJECTED（退回补充）
+
+**为什么 AI 不自动放行**：工单沉淀进知识库后会成为后续 AI 回答的依据——"错一条，污染一片"。所以 AI 只负责把信息结构化、对空缺字段回填、降低人工核对成本，最终把关权交给人（主管/管理员可退回），防止低质量工单污染检索。
 
 ---
 
@@ -905,7 +1330,7 @@ WebSocket 适合双向实时通信（如聊天室），AI 问答场景用 SSE �
 **A**：通用 LangChain Agent 是**单 agent + tools** 模式，agent 自己决定调哪个工具。我的专家模式（`/answer/expert`）是"**拆解 + 并行隔离**"：
 1. **(1) FaultDecomposer 拆解**：规则预检（零 LLM）+ LLM 把复合故障拆成单故障子查询，拆解器不直接检索
 2. **(2) 每个子查询独立跑 `RetrievalAssistantAgent`**（ReAct 循环 + 检索工具），彼此**不共享状态、不共享候选**
-3. **(3) 并行执行**：`ThreadPoolExecutor` 上限 5，各子查询同时跑，不是串行
+3. **(3) 并行执行**：`asyncio.gather + asyncio.to_thread`（每个子查询跑独立线程的 ReAct 循环），各子查询同时跑，整体 `wait_for(90s)` 超时，不是串行
 4. **(4) 分组流式回答**：`stream_answer_multi` 按故障分组输出，不是合成一份加权报告
 
 通用 Agent 适合"一个 agent 自主完成复杂工具调用"；我的场景适合"**复合问题先拆开、再并行独立解决**"——拆解层管分、检索层管准、回答层管组。
@@ -924,8 +1349,8 @@ WebSocket 适合双向实时通信（如聊天室），AI 问答场景用 SSE �
 
 ### Q17：你项目里最难的工程问题是什么？
 
-**A**：**检索准确率**。早期上线后用户反馈"AI 答非所问"，排查发现：
-1. Embedding API Key 没配 → 走 SHA-256 fallback → 相似度分数随机
+**A**：**检索准确率**。早期开发过程中用户反馈"AI 答非所问"，排查发现：
+1. 单路向量检索召回不全（口语"嗡嗡响"匹配不到标题里的"异响"）
 2. 同会话上下文复用 → 第二次检索带第一次的上下文 → 结果跑偏
 3. RRF 去重用错键 → 同条工单双路命中分不合并
 4. SQL 缺 ORDER BY → 相关工单被截断
@@ -941,32 +1366,35 @@ WebSocket 适合双向实时通信（如聊天室），AI 问答场景用 SSE �
 1. **(1) 检索阶段**：手动构造 50 个典型问题，看 top_k 命中率（是否包含相关工单）
 2. **(2) 生成阶段**：人工评估回答是否基于案例、是否瞎编、是否结构化
 3. **(3) 端到端**：用户反馈（点赞/点踩），统计有用率
-4. **(4) LangFuse 追踪**：每次调用打 trace，看 token 消耗、延迟、错误率
-5. **(5) `feedback_anomaly_check`**：负向率用 `not_useful/views` 计算，避免逻辑错误
+4. **(4) 多后端追踪**：每次调用打 trace（RAGFlow 默认 / LangFuse / local），看 token 消耗、延迟、错误率
+5. **(5) 可观测报告**：验证 Agent 输出 report（每轮 sufficient / 剔除数 / 重搜策略 / 拦截率），量化"验证拦截率"与"sufficient 率"ROI
 
 ---
 
-### Q19：如果工单库从 538 条扩到 100 万条，你的架构要怎么改？
+### Q19：如果工单库从 200 条 seed 扩到 100 万条，你的架构要怎么改？
 
 **A**：
-1. **(1) Milvus 索引切换**：IVF_FLAT → HNSW（百万级 HNSW 性能更好），`nlist` 调到 `4*sqrt(N)`
-2. **(2) BM25 优化**：PG ILIKE 改成 PG 全文检索（`tsvector + tsquery + GIN 索引`），或上 Elasticsearch
-3. **(3) Embedding 批量化**：`encode_texts` 改成真正的批量推理，不是循环 `encode_text`
-4. **(4) 设备分片**：按设备类型预分片，检索 Agent 只查自己设备域的子集合
-5. **(5) 缓存层**：高频 query 的检索结果走 Redis 缓存，避免重复计算
-6. **(6) 异步化**：检索改成真异步（SQLAlchemy async engine + asyncpg），避免阻塞事件循环
+1. **(1) Milvus 索引切换**：IVF_FLAT → HNSW（百万级 HNSW 性能更好），`nlist` 调到 `4*sqrt(N)`，`nprobe` 按召回/延迟实测调优（现有 nlist=1024/nprobe=16 是千级数据量配置，见 4.1.8）
+2. **(2) BM25 优化（三层渐进，见 4.1.7）**：先确认 pg_trgm 索引实际生效（`EXPLAIN` 看是否走 `Bitmap Index Scan`）→ 不够再按设备类型/时间分区 → 仍不够再换 PG 全文检索（`tsvector + tsquery + GIN 索引`）或上 Elasticsearch
+3. **(3) 检索质量演进**：动态阈值（数据量大了固定 0.15 失真，精确查询 0.30 / 模糊查询动态百分位）+ 两阶段检索（召回扩到 top 50~100 再精排选 8）——这两项对"查得准"比纯索引更重要
+4. **(4) Embedding 批量化**：`encode_texts` 改成真正的批量推理，不是循环 `encode_text`
+5. **(5) 设备分片**：按设备类型预分片，检索 Agent 只查自己设备域的子集合
+6. **(6) 缓存层**：高频 query 的检索结果走 Redis 缓存（`question + device_type` → 结果，知识库版本变更失效），避免重复计算 Milvus/LLM
+7. **(7) 异步化**：检索改成真异步（SQLAlchemy async engine + asyncpg），避免阻塞事件循环
+
+> 核心思路：**索引兜底（保持速度）是前提，质量演进（保持准确）才是重点**——数据量大了最难的从"检索慢"变成"检索不准"，所以 3 的优先级高于 2。
 
 ---
 
 ### Q20：项目里用 Redis 做了什么？
 
 **A**：
-1. **(1) 会话缓存**：钉钉机器人对话、引导式维修会话，24h TTL
-2. **(2) 检索结果缓存**：相同 query 的检索结果短时缓存
-3. **(3) 工单理解结果缓存**：相同 fault_description 的 LLM 分析结果缓存
-4. **(4) 分布式锁**（计划中）：避免并发工单理解重复调用 LLM
+1. **(1) 会话缓存**：钉钉机器人对话、引导式维修会话，24h TTL（`_SESSION_TTL = 24 * 3600`）
+2. **(2) 备件库存查询缓存**：`spare_parts.py` 高频读走 Redis 短时缓存（30s），避免重复查库
+3. **(3) 关键词提取 LLM 缓存**：`query_extractor` 相同 query 的 LLM 提取结果内存缓存 10 分钟，省 LLM 调用
+4. **(4) 分布式锁**（规划中）：cache_service 已留"分布式锁基础"注释位，避免并发工单理解重复调用 LLM
 
-所有 Redis 操作都用 `redis.asyncio`，全异步，不走回调风格。
+所有 Redis 操作都用 `redis.asyncio` 全异步封装（cache_service），不走回调风格。
 
 ---
 
@@ -984,7 +1412,7 @@ WebSocket 适合双向实时通信（如聊天室），AI 问答场景用 SSE �
 
 ### Q22：多故障提问（如"主轴过热还有换刀故障"）会检索串味，你怎么解决？
 
-**A**：这是上线后真实踩过的坑——早期参考案例会混入"黑屏""输送设备电机过热"等无关案例。串味根因是：单路向量检索 + 0.15 阈值太松 + 没有设备/故障维度校验。治理分两条线：
+**A**：这是开发过程中真实踩过的坑——早期参考案例会混入"黑屏""输送设备电机过热"等无关案例。串味根因是：单路向量检索 + 0.15 阈值太松 + 没有设备/故障维度校验。治理分两条线：
 
 **A（检索层 · 串味根治）**：
 1. **强制混合检索**（`require_hybrid`）：首轮确定性执行 vector + BM25 双路，达标直接 RRF 融合，避免 Agent 第一轮选 vector 达标就早停，"混合检索"名存实亡
@@ -1083,7 +1511,7 @@ Judge 判不足时触发**自主重搜循环**（agentic loop）：LLM 规划重
 `DRAFT → SUBMITTED → ASSIGNED → ACCEPTED → ARRIVED → INSPECTING → IN_PROGRESS → COMPLETED → ARCHIVING → ARCHIVED / REJECTED`（保留 STANDARDIZED/CLASSIFIED/APPROVED 兼容旧数据）。每次流转写 `progress_logs` 全程留痕（from/to/operator/source）+ 更新维修员在办数。
 
 **② 完成工单自动触发**（`api/work_orders.py` `_auto_publish_knowledge`）：
-幂等（`source_type + source_id` 防同一工单重复提取）→ `KnowledgeExtractorAgent` 抽取（标题 15-30 字 + 现象/原因/排查/处理/预防五段式内容 + keywords）→ **去重检测** → 发布（PUBLISHED）→ 同步 Milvus 向量。
+幂等（`source_type + source_id` 防同一工单重复提取）→ `KnowledgeExtractorAgent` 抽取（标题 15-30 字 + 现象/原因/排查/处理/预防五段式内容 + keywords）→ **去重检测** → 发布（PUBLISHED）→ 同步 Milvus 向量。（工单层面由主管/管理员最终把关，可退回 REJECTED——审核流程见 4.4.2）
 
 **③ 三层去重链**（防止知识库被污染，核心难点）：
 1. **快速路径**：故障码 + 设备精确匹配（`fault_code LIKE`）→ 命中直接调 LLM 判重
@@ -1134,6 +1562,39 @@ Judge 判不足时触发**自主重搜循环**（agentic loop）：LLM 规划重
 - 面试官看重的不是背数字，而是**知道每个值在权衡什么**；诚实说"经验调参 + 线上微调"，比假装有理论推导更可信
 - 注意：文档早期版本有"0.65"的说法，**代码里没有 0.65**，以 0.45/0.55/0.75/0.85 为准。
 
+**（g）被追问"这两个线是怎么划定的？"——划定方法 + 收尾话术（必背）**
+
+划定方法不是拍脑袋，是**"先观测分数分布，再按代价分层定线"**三步：
+1. **标注真重复样例**：拿一批人工确认的"真重复"（同因同方案但措辞不同，如"温度偏高" vs "温控偏高"）跑向量检索
+2. **观测集中区**：这批真重复的相似度集中在 **0.5~0.6**——这就是"真重复长什么样"的实测分布
+3. **按代价分层定线**：
+   - **0.45 召回线**：真重复集中区下限 0.5 留 0.05 缓冲 → 管"**要不要进候选**"，宁滥勿缺（漏判进库污染不可逆，多召回只是多几个候选）
+   - **0.55 判重线**：真重复集中区上沿 → 管"**要不要花一次 LLM**"（0.45~0.55 观望区召回但不判；≥0.55 疑似重复集中区才花 LLM；>0.7 基本是同文复述、判重收益小）
+   - **0.85 不是实测**：故障码 LIKE 命中路径本身没有相似度概念，代码传固定标记分只为统一排序展示
+
+**收尾话术（背下来）**：
+
+> **"这两条线分管的不是一件事：0.45 管'要不要找'——召回线，宁滥勿缺；0.55 管'要不要花 LLM'——成本线，只在疑似集中区才花钱。中间 0.45~0.55 是观望区：进候选列表但不判重。线的位置不是拍的，是先拿标注样例看真重复的分数分布（集中在 0.5~0.6），再按'漏判污染不可逆 vs LLM 成本'的代价权衡定下来的。"**
+
+---
+
+### Q27：你的多轮对话/会话管理是怎么设计的？（追问：历史无限增长怎么办？）
+
+**A**：会话管理按"需要多少上下文"分档，不是一刀切：
+
+1. **(1) 分档策略**：
+   - **智能问答无状态**：一次一答，不建会话（问答是长回答，语义由单次检索决定，不需要上下文）
+   - **追踪维修 / 专家模式有状态**：多轮交互必须知道"前面查了什么"，所以 Redis 会话 24h TTL + 历史注入
+   - **钉钉**在其上叠加 staff→session 映射，24h 无对话自动开新会话，跨班次隔离
+2. **(2) 防历史无限膨胀（三防线）**：
+   - **步数上限**：追踪/专家都限制 30 步，超限强制总结结束
+   - **后端增量摘要压缩**：`chat_history` 超 25 条 → 最旧部分与已有 `history_summary` 一起交给 SessionSummarizer 生成新摘要，只保留最近 20 条原文——**增量式、失败保留原文兜底**
+   - **前端压缩**：前端会话消息达 `COMPRESS_BATCH` 调 `/summarize` 压成 summary 条目
+3. **(3) 三层上下文注入**：`[首轮分析/初始问题] + [已压缩摘要] + [最近原文]` 拼进 prompt——LLM 既能感知全局，又不超 token 窗口（DeepSeek 64K）
+4. **(4) 专家模式特殊点**：首轮先做共因判定 + 维修优先级（对话中明确说出），多轮引导时 LLM 判断"已解决/部分解决/未解决"，共因解决后其他现象随之消失则直接结束——**问答 + 追踪的结合**（详见 4.3.6 / 4.9）
+
+> 一句话：**只在需要上下文的场景花存储和 token；步数上限 + 后端增量摘要 + 前端压缩三道防线，让长会话永远可控。**
+
 ---
 
 ## 9. 项目亮点与可吹嘘的点
@@ -1147,6 +1608,8 @@ Judge 判不足时触发**自主重搜循环**（agentic loop）：LLM 规划重
 5. **(5) **验证 Agent 三层把关**：Gate（客观零 LLM）+ Judge（语义裁决）+ 存在性核对（DB 查库），Judge 不足时 LLM 规划重搜策略自主重搜循环（max_iterations=2），把"回答不编造"从 Prompt 软约束升级为机制保障
 6. **(6) **本地 Embedding 部署**：Qwen3-Embedding-0.6B 本地推理，省 API 费用，数据不出企业
 7. **(7) **流式 SSE 五段式回答**：结构化输出 + 实时流式 + 案例来源严格保真
+8. **(8) **双路索引对称支撑**：向量路 Milvus `IVF_FLAT + COSINE`（nlist=1024/nprobe=16，见 4.1.8）+ BM25 路 PG `pg_trgm` GIN 索引（见 4.1.6）——两条检索路都有索引支撑，数据增长不拖累任何一路；配合 `score_threshold=0.0` 全量召回 + 后段融合精排的分层设计
+9. **(9) **错误码路由**：`extract_error_codes` 纯正则识别错误码（零 LLM）→ 决定 2 路/4 路切换 + 手册权威答案置顶（`manual_code_exact`）——用正则而非 LLM，零成本、可预测、无幻觉
 
 ### 9.2 工程实践亮点
 
@@ -1154,13 +1617,13 @@ Judge 判不足时触发**自主重搜循环**（agentic loop）：LLM 规划重
 2. **(2) **分级超时与降级**：拆解 20s / 单故障检索 60s / 多故障并行整体 90s，超时降级为"按单故障处理 / 空结果如实回答"，不挂死
 3. **(3) **错误码置顶修正**：RRF 名次融合对单路权威条目（manual_code_exact）不公平，融合后按 method 置顶，避免"SV0436 精确命中"排不过泛相似案例
 4. **(4) **SSE 事件协议统一**：专家模式与 /answer/stream 共用 thinking / references / answer / done 事件，参考案例带 fault 归属标签，前端零改动复用
-5. **(5) **LangFuse 追踪**：每次 LLM 调用都打 trace，便于性能优化
+5. **(5) **多后端追踪（RAGFlow 默认）**：`TRACING_BACKEND=ragflow`，trace 持久化到 RAGFlow 数据集，不可达降级本地日志
 6. **(6) **Alembic 迁移健壮性**：`IF NOT EXISTS` + `ADD VALUE IF NOT EXISTS`，避免重复迁移报错
 
 ### 9.3 业务价值亮点
 
 1. **(1) **知识沉淀闭环**：工单 → 知识库 → AI 检索 → 新工单，形成正向循环
-2. **(2) **置信度驱动审批**：自动审批通过率提升 60%，审核成本下降
+2. **(2) **AI 辅助人工把关**：提交完成时 AI 标准化分析并回填缺失字段，主管/管理员最终审核，审核效率提升、成本下降
 3. **(3) **跨域复杂故障处理**：传统单检索无法处理的"机械+液压+电气同时出问题"场景
 4. **(4) **钉钉企业集成**：OAuth + 机器人 + OA 审批，无缝接入企业现有工作流
 
@@ -1170,7 +1633,7 @@ Judge 判不足时触发**自主重搜循环**（agentic loop）：LLM 规划重
 
 ### 10.1 30 秒电梯演讲
 
-> 我做了一个面向制造企业的智能维修系统。核心是把维修工单沉淀成知识库，通过 RAG 让 AI 检索历史案例给出诊断建议。技术上用 FastAPI + LangChain + LangGraph + Milvus，最大的亮点是**专家模式的多故障拆解并行**：当用户问题同时涉及机械+液压+电气多个故障域时，FaultDecomposer 把复合问题拆成多个单故障子查询，并行 ReAct 检索、按故障分组流式回答。这避免了单检索在跨域问题上语义被稀释的问题，准确率从 60% 提升到 85%。
+> 我做了一个面向制造企业的智能维修系统。核心是把维修工单沉淀成知识库，通过 RAG 让 AI 检索历史案例给出诊断建议。技术上用 FastAPI + LangChain + LangGraph + Milvus，最大的亮点是**专家模式的多故障拆解并行**：当用户问题同时涉及机械+液压+电气多个故障域时，FaultDecomposer 把复合问题拆成多个单故障子查询，并行 ReAct 检索、按故障分组流式回答。这避免了单检索在跨域问题上语义被稀释的问题，检索准确率从 30% 提升到 85%。
 
 ### 10.2 演示跨域问题的标准话术
 
@@ -1222,7 +1685,7 @@ Judge 判不足时触发**自主重搜循环**（agentic loop）：LLM 规划重
 | Milvus 封装 | `backend/app/core/vector_store.py` |
 | 数据库 | `backend/app/core/database.py` |
 | Redis 缓存 | `backend/app/core/cache_service.py` |
-| LangFuse 追踪 | `backend/app/core/langfuse_tracer.py` |
+| LangFuse/RAGFlow 追踪 | `backend/app/core/langfuse_tracer.py`（多后端：RAGFlow / LangFuse / local） |
 | 检索 API | `backend/app/api/search.py` |
 | 检索工具集 | `backend/app/agents/tools.py` |
 | 查询清洗 | `backend/app/agents/tools.py` (`clean_query_for_retrieval`) |
@@ -1237,14 +1700,14 @@ Judge 判不足时触发**自主重搜循环**（agentic loop）：LLM 规划重
 | **验证 Agent** | `backend/app/agents/verify_agent.py`（Gate + Judge + 重搜 + 存在性核对） |
 | **故障拆解器** | `backend/app/agents/fault_decomposer.py`（专家模式拆解，`_MAX_SUB_QUERIES=4`） |
 | 会话摘要 | `backend/app/agents/session_agent.py` |
-| 多专家 Agent（文档规划，代码未落地） | `backend/app/agents/expert_agents.py` |
-| Planner（文档规划，代码未落地） | `backend/app/agents/planner.py` |
-| Orchestrator（文档规划，代码未落地） | `backend/app/agents/orchestrator.py` |
 | 知识模型 | `backend/app/models/knowledge.py` |
 | 工单模型 | `backend/app/models/work_order.py` |
 | 手册错误码模型 | `backend/app/models/manual_code.py` |
-| Docker 编排 | `docker-compose.dev.yml` |
+| **MCP Server** | `backend/app/mcp/server.py`（fastmcp，挂载 `/mcp`，`mcp_access_guard` 认证） |
+| **MCP 工具实现** | `backend/app/mcp/tools.py`（与钉钉机器人共用同一来源） |
+| Docker 编排 | `docker-compose.yml`（start_all.ps1 使用；`docker-compose.dev.yml` 额外带 Attu UI） |
 | 依赖清单 | `requirements.txt`（项目根目录，唯一权威版本） |
+| 一键启动 | `start_all.ps1`（项目根目录，端口冲突检查 + 全栈拉起） |
 | 手册错误码导入脚本 | `backend/scripts/import_manual_codes.py` |
 
 ## 附录 B：演示用跨域 query

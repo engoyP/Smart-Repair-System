@@ -76,6 +76,13 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     LOG_FILE: str = "logs/app.log"
 
+    # Embedding 服务配置（OpenAI 兼容接口，供 RAGFlow 等外部系统调用）
+    EMBEDDING_SERVER_HOST: str = "0.0.0.0"
+    EMBEDDING_SERVER_PORT: int = 8010
+    EMBEDDING_MODEL_NAME: str = "Qwen3-Embedding-0.6B"
+    EMBEDDING_MAX_LENGTH: int = 512
+    EMBEDDING_LOG_FILE: str = "logs/embedding_server.log"
+
     # 追踪后端选择：ragflow | langfuse | local
     TRACING_BACKEND: str = "ragflow"
 

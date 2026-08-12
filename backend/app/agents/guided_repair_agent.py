@@ -99,7 +99,7 @@ class GuidedRepairAgent:
 - 优先引导排查最常见、最容易验证的原因
 - 如果维修员反馈"问题解决"，立即结束并生成维修总结
 - 如果检索案例中有匹配的案例，优先参考案例中的排查步骤
-- 最多引导 8 步，超过后自动总结当前进展
+- 最多引导 30 步，超过后自动总结当前进展
 
 ## 输出格式（严格 JSON）
 {
@@ -125,6 +125,11 @@ class GuidedRepairAgent:
     _SESSION_TTL = 24 * 3600  # 会话有效期 24 小时（Redis TTL），覆盖跨班次/跨天排查
     _SESSION_KEY_PREFIX = "guided_repair_session:"
 
+    MAX_STEPS = 30  # 排查步数上限：超上限自动总结结束（长故障/复合故障也能引导到底）
+    # 对话历史压缩策略：chat_history 条数超过阈值时，把最旧的并入 LLM 摘要，保留最近原文
+    _HISTORY_COMPRESS_THRESHOLD = 25  # 超过该条数触发压缩
+    _HISTORY_KEEP_RAW = 20            # 压缩后保留的最近原文条数
+
     def __init__(self):
         self._llm: Optional[ChatOpenAI] = None
 
@@ -138,12 +143,44 @@ class GuidedRepairAgent:
             return None
 
     def _save_session(self, session_id: str, data: Dict):
-        """保存会话到 Redis（TTL 2 小时），解决重启/多进程丢失会话问题"""
+        """保存会话到 Redis（TTL 24 小时）：保存前先对超长历史做摘要压缩，解决重启/多进程丢失会话问题"""
         try:
+            self._maybe_compress_history(data)
             from app.core.cache_service import cache_service
             cache_service.set(f"{self._SESSION_KEY_PREFIX}{session_id}", data, ttl=self._SESSION_TTL)
         except Exception as e:
             logger.warning(f"[GuidedRepair] 会话保存失败: {e}")
+
+    def _maybe_compress_history(self, session: Dict):
+        """对话历史过长时用 LLM 增量压缩最旧部分，避免 30 步上限下历史无限膨胀
+
+        策略：
+        - chat_history 条数 ≤ 阈值 → 不压缩（省 LLM 调用）
+        - 超过阈值 → 把最旧的 (len - KEEP_RAW) 条与已有的 history_summary 一起
+          交给 SessionSummarizer 生成新摘要，会话只保留最近 KEEP_RAW 条原文
+        - 压缩失败 → 保留原文（安全兜底，绝不让会话因压缩崩溃丢历史）
+        """
+        history = session.get("chat_history", [])
+        if not history or len(history) <= self._HISTORY_COMPRESS_THRESHOLD:
+            return
+        split = len(history) - self._HISTORY_KEEP_RAW
+        old, keep = history[:split], history[split:]
+        msgs = []
+        if session.get("history_summary"):
+            msgs.append({"role": "assistant", "content": f"[历史摘要]\n{session['history_summary']}"})
+        for h in old:
+            msgs.append({"role": "user", "content": h.get("user", "")})
+            if h.get("ai"):
+                msgs.append({"role": "assistant", "content": h["ai"]})
+        try:
+            from app.agents.session_agent import session_summarizer
+            summary = session_summarizer.summarize(msgs)
+        except Exception as e:
+            logger.warning(f"[GuidedRepair] 历史摘要压缩失败，保留原文: {e}")
+            return
+        session["history_summary"] = summary
+        session["chat_history"] = keep
+        logger.info(f"[GuidedRepair] 历史已压缩: {len(old)} 条并入摘要，保留最近 {len(keep)} 条原文")
 
     @property
     def llm(self) -> ChatOpenAI:
@@ -292,11 +329,11 @@ class GuidedRepairAgent:
             )
 
         step_num = len(session["history"]) + 1
-        if step_num > 8:
+        if step_num > self.MAX_STEPS:
             return GuidedRepairStep(
                 session_id=session_id,
                 step=step_num,
-                message="已达到最大排查步骤（8步）。建议根据已完成排查的情况联系资深工程师进一步分析。",
+                message=f"已达到最大排查步骤（{self.MAX_STEPS}步）。建议根据已完成排查的情况联系资深工程师进一步分析。",
                 options=[],
                 summary=self._generate_final_summary(session),
                 status="completed",
@@ -486,8 +523,8 @@ class GuidedRepairAgent:
 - 明确说"问题已解决！"，用 2-3 句话总结故障原因和处理方法即可
 - 不需要重新写完整的"问题分析-可能原因-排查方向-处理方案-预防建议"
 
-## 最多 8 步
-超过 8 步还没解决，就说"建议将目前排查情况提交给资深工程师进一步分析"
+## 最多 30 步
+超过 30 步还没解决，就说"建议将目前排查情况提交给资深工程师进一步分析"
 
 ## 回答风格
 - 像一位有经验的老师傅在带徒弟，口语化但专业
@@ -528,8 +565,10 @@ class GuidedRepairAgent:
             content = (c.get('content', '') or '')[:600]
             cases_text += f"\n【参考案例{i}】{c.get('title', '')}\n故障原因: （从案例中提取）\n处理要点: {content}\n"
 
-        # 构建对话历史
+        # 构建对话历史（历史过长时已压缩成摘要，优先注入摘要 + 保留最近原文）
         history_text = ""
+        if session.get("history_summary"):
+            history_text += f"[已压缩的历史摘要]\n{session['history_summary']}\n\n"
         for h in session.get("chat_history", []):
             history_text += f"\n维修员: {h['user']}\n你: {h['ai']}\n"
 
@@ -609,8 +648,10 @@ class GuidedRepairAgent:
             content = (c.get('content', '') or '')[:600]
             cases_text += f"\n【参考案例{i}】{c.get('title', '')}\n故障原因: （从案例中提取）\n处理要点: {content}\n"
 
-        # 构建对话历史
+        # 构建对话历史（历史过长时已压缩成摘要，优先注入摘要 + 保留最近原文）
         history_text = ""
+        if session.get("history_summary"):
+            history_text += f"[已压缩的历史摘要]\n{session['history_summary']}\n\n"
         for h in session.get("chat_history", []):
             history_text += f"\n维修员: {h['user']}\n你: {h['ai']}\n"
 

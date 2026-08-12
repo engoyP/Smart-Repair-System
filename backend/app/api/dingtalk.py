@@ -426,7 +426,6 @@ def mobile_report(req: MobileReportRequest, db: Session = Depends(get_db)):
     工作人员通过移动端扫码/拍照/语音上报故障
     - 自动生成工单编号
     - 触发 AI 分析和派工
-    - 如需人工审核，通知管理员
     - 返回工单状态
     """
     today = datetime.now().strftime("%Y%m%d")
@@ -448,12 +447,6 @@ def mobile_report(req: MobileReportRequest, db: Session = Depends(get_db)):
     db.add(work_order)
     db.commit()
     db.refresh(work_order)
-
-    try:
-        from app.api.work_orders import _analyze_and_review
-        analysis_result = _analyze_and_review(work_order, db)
-    except Exception as e:
-        logger.warning(f"[Mobile] AI 分析失败: {e}")
 
     return {
         "work_order_id": work_order.id,

@@ -139,7 +139,7 @@ if (-not $SkipDB) {
         }
 
         Write-Host "  同步知识向量到 Milvus（首次会下载 Embedding 模型，耗时较长）..."
-        & $VenvPython (Join-Path $BackendDir "sync_vectors.py") | Out-Host
+        & $VenvPython (Join-Path $BackendDir "scripts\sync_vectors.py") | Out-Host
         if ($LASTEXITCODE -eq 0) { Ok "向量同步完成" } else { Warn "向量同步异常，请检查 Milvus 是否健康（docker-compose ps）" }
     } else {
         Fail "虚拟环境不存在，请先执行后端依赖安装"
@@ -180,11 +180,11 @@ Write-Host ""
 Write-Host "  终端 2 - 后端:" -ForegroundColor Yellow
 Write-Host "      cd backend"
 Write-Host "      .\.venv\Scripts\Activate.ps1"
-Write-Host "      uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload"
+Write-Host "      uvicorn app.main:app --host 0.0.0.0 --port 18080"
 Write-Host ""
 Write-Host "  终端 3 - 前端:" -ForegroundColor Yellow
 Write-Host "      cd frontend"
 Write-Host "      npm run dev"
 Write-Host ""
-Write-Host "  访问: http://127.0.0.1:3000   接口文档: http://127.0.0.1:8000/docs" -ForegroundColor Green
+Write-Host "  访问: http://127.0.0.1:4173   接口文档: http://127.0.0.1:18080/docs" -ForegroundColor Green
 Write-Host ""

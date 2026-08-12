@@ -60,7 +60,7 @@ class NotificationService:
         content = f"""## 待审核工单
 - **工单编号**: {work_order_no}
 - **设备**: {device}
-- **AI 置信度**: {confidence:.0%}
+- **置信度**: {confidence:.0%}
 - **描述**: {description[:100]}
 
 请及时登录管理后台处理。

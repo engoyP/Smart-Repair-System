@@ -354,13 +354,12 @@ def analyze_work_order(work_order_id: int, db: Session = Depends(get_db)):
         missing_fields=analysis.missing_fields,
         validation_notes=analysis.validation_notes,
         confidence=analysis.confidence,
-        auto_approved=False,
         raw_reasoning=analysis.raw_reasoning,
         suggested_actions=analysis.suggested_actions,
     )
 
 
-@router.post("/{work_order_id}/complete", summary="提交完成工单（AI 审批+去重+收录知识）")
+@router.post("/{work_order_id}/complete", summary="提交完成工单（AI 分析+去重+收录知识）")
 def complete_work_order(work_order_id: int, db: Session = Depends(get_db)):
     """
     维修人员确认全部填写完成并提交：
