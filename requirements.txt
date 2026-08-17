@@ -43,9 +43,10 @@ python-multipart==0.0.32       # 文件/表单上传解析（FastAPI 上传接�
 python-jose[cryptography]==3.3.0  # JWT 生成与校验：登录令牌（access_token）
 passlib[bcrypt]==1.7.4         # 密码哈希：bcrypt 加密存储用户密码
 
-# ---------- Embedding 模型（Qwen3-Embedding-0.6B）----------
+# ---------- Embedding / Rerank 模型（bge-m3 + Qwen3-Reranker-0.6B）----------
 torch==2.6.0                    # PyTorch 深度学习框架：运行本地模型推理（体积最大）
-transformers>=4.40.0            # HuggingFace 模型库：加载/运行 Qwen3-Embedding
+transformers>=4.40.0            # HuggingFace 模型库：加载/运行 Qwen3-Reranker
+FlagEmbedding>=1.2.10           # BGE 官方库：加载 bge-m3（召回编码）+ Qwen3-Reranker（精排打分）
 
 # ---------- HTTP 客户端 ----------
 httpx==0.28.1                  # 异步 HTTP 客户端：调用 DeepSeek、钉钉 API

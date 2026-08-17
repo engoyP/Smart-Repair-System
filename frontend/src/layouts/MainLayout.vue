@@ -192,14 +192,14 @@
               </el-menu-item>
 
               <div class="menu-group-label">知识管理</div>
-              <el-menu-item index="/knowledge">
-                <el-icon><Reading /></el-icon>
-                <template #title>知识库</template>
-              </el-menu-item>
-              <el-menu-item index="/knowledge/manuals">
-                <el-icon><Document /></el-icon>
-                <template #title>设备手册</template>
-              </el-menu-item>
+              <el-sub-menu index="/knowledge">
+                <template #title>
+                  <el-icon><Reading /></el-icon>
+                  <span>知识库</span>
+                </template>
+                <el-menu-item index="/knowledge/list">知识列表</el-menu-item>
+                <el-menu-item index="/knowledge/manuals">设备手册</el-menu-item>
+              </el-sub-menu>
 
               <div class="menu-group-label">基础数据</div>
               <el-menu-item index="/devices">
@@ -295,12 +295,13 @@
                 <el-menu-item index="/ai-assistant">
                   <el-icon><ChatLineSquare /></el-icon>
                 </el-menu-item>
-                <el-menu-item index="/knowledge">
-                  <el-icon><Reading /></el-icon>
-                </el-menu-item>
-                <el-menu-item index="/knowledge/manuals">
-                  <el-icon><Document /></el-icon>
-                </el-menu-item>
+                <el-sub-menu index="/knowledge">
+                  <template #title>
+                    <el-icon><Reading /></el-icon>
+                  </template>
+                  <el-menu-item index="/knowledge/list">知识列表</el-menu-item>
+                  <el-menu-item index="/knowledge/manuals">设备手册</el-menu-item>
+                </el-sub-menu>
                 <el-menu-item index="/devices">
                   <el-icon><Monitor /></el-icon>
                 </el-menu-item>
@@ -373,6 +374,8 @@ const activeMenu = computed(() => {
   const path = route.path
   if (path.startsWith('/work-orders')) return '/work-orders'
   if (path.startsWith('/devices')) return '/devices'
+  if (path.startsWith('/knowledge/manuals')) return '/knowledge/manuals'
+  if (path.startsWith('/knowledge/list')) return '/knowledge/list'
   if (path.startsWith('/knowledge')) return '/knowledge'
   if (path.startsWith('/ai-assistant')) return '/ai-assistant'
   if (path.startsWith('/categories')) return '/categories'
@@ -646,11 +649,36 @@ watch(() => route.path, () => {
   color: var(--color-sidebar-active-text);
 }
 
+.sidebar-menu :deep(.el-sub-menu__title) {
+  height: 40px;
+  line-height: 40px;
+  margin: 2px 12px;
+  border-radius: 8px;
+  font-size: 14px;
+  color: var(--color-sidebar-text) !important;
+  transition: background .15s, color .15s;
+}
+.sidebar-menu :deep(.el-sub-menu__title:hover) {
+  background: #F7F8FA !important;
+  color: var(--color-text-primary) !important;
+}
+.sidebar-menu :deep(.el-sub-menu.is-active > .el-sub-menu__title) {
+  color: var(--color-sidebar-active-text) !important;
+  font-weight: 500;
+}
+
 .sidebar.collapsed :deep(.el-menu-item) {
   margin: 2px 8px;
   justify-content: center;
 }
 .sidebar.collapsed :deep(.el-menu-item .el-icon) {
+  margin-right: 0;
+}
+.sidebar.collapsed :deep(.el-sub-menu__title) {
+  margin: 2px 8px;
+  justify-content: center;
+}
+.sidebar.collapsed :deep(.el-sub-menu__title .el-icon) {
   margin-right: 0;
 }
 

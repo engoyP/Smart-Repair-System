@@ -36,9 +36,9 @@
             <el-icon :size="24"><Reading /></el-icon>
           </div>
           <div class="stat-info">
-            <div class="stat-value">{{ stats.total_knowledge }}</div>
-            <div class="stat-label">知识条目</div>
-            <div class="stat-extra">已发布 {{ stats.published_knowledge }} · 审核中 {{ stats.under_review_knowledge }}</div>
+            <div class="stat-value">{{ knowledgeContentTotal }}</div>
+            <div class="stat-label">知识库内容</div>
+            <div class="stat-extra">知识 {{ stats.total_knowledge }} · 手册 {{ stats.total_manual_codes }}</div>
           </div>
         </div>
       </el-card>
@@ -172,11 +172,15 @@
     <el-card class="section-card" shadow="never">
       <template #header>
         <div class="section-header">
-          <span class="section-title">知识库概览</span>
-          <el-button size="small" text type="primary" @click="$router.push('/knowledge')">知识管理</el-button>
+            <span class="section-title">知识库与手册概览</span>
+          <el-button size="small" text type="primary" @click="$router.push('/knowledge/list')">知识管理</el-button>
         </div>
       </template>
       <div class="knowledge-stats">
+        <div class="ks-item">
+          <div class="ks-value">{{ knowledgeContentTotal }}</div>
+          <div class="ks-label">内容总数</div>
+        </div>
         <div class="ks-item">
           <div class="ks-value">{{ stats.total_knowledge }}</div>
           <div class="ks-label">知识条目</div>
@@ -188,6 +192,10 @@
         <div class="ks-item">
           <div class="ks-value" style="color: #00B42A">{{ stats.published_knowledge }}</div>
           <div class="ks-label">已发布</div>
+        </div>
+        <div class="ks-item clickable" @click="$router.push('/knowledge/manuals')">
+          <div class="ks-value">{{ stats.total_manual_codes }}</div>
+          <div class="ks-label">设备手册</div>
         </div>
         <div class="ks-item">
           <div class="ks-value">{{ stats.total_devices }}</div>
@@ -212,6 +220,7 @@ const stats = ref({
   today_orders: 0,
   pending_review: 0,
   total_knowledge: 0,
+  total_manual_codes: 0,
   published_knowledge: 0,
   under_review_knowledge: 0,
   stock_alert: 0,
@@ -222,6 +231,10 @@ const stats = ref({
 const dm = computed(() => stats.value.device_monitor)
 const recentOrders = ref([])
 const alertItems = ref([])
+
+const knowledgeContentTotal = computed(() => {
+  return (stats.value.total_knowledge || 0) + (stats.value.total_manual_codes || 0)
+})
 
 const statusMap = {
   DRAFT: '草稿',
@@ -237,6 +250,7 @@ const fetchStats = async () => {
 
     stats.value.total_orders = res.total_orders || 0
     stats.value.total_knowledge = res.total_knowledge || 0
+    stats.value.total_manual_codes = res.total_manual_codes || 0
     stats.value.total_devices = res.total_devices || 0
     stats.value.total_spare_parts = res.total_spare_parts || 0
     stats.value.stock_alert = res.stock_alert || 0
@@ -315,8 +329,21 @@ onMounted(() => { fetchStats() })
 .qty-safe { color: var(--color-text-disabled); }
 
 /* 知识统计 */
-.knowledge-stats { display: flex; gap: 40px; }
-.ks-item { text-align: center; min-width: 80px; }
+.knowledge-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 12px;
+}
+.ks-item {
+  text-align: center;
+  min-width: 0;
+  padding: 12px 8px;
+  background: #FAFBFC;
+  border: 1px solid var(--color-border-light);
+  border-radius: 8px;
+}
+.ks-item.clickable { cursor: pointer; transition: border-color .2s, box-shadow .2s; }
+.ks-item.clickable:hover { border-color: rgba(15, 198, 194, 0.45); box-shadow: var(--shadow-card-hover); }
 .ks-value { font-size: 24px; font-weight: 700; color: var(--color-text-primary); }
 .ks-label { font-size: 13px; color: var(--color-text-tertiary); margin-top: 6px; }
 
@@ -341,5 +368,10 @@ onMounted(() => { fetchStats() })
 
 @media (max-width: 900px) {
   .monitor-cards { grid-template-columns: repeat(3, 1fr); }
+  .knowledge-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
+@media (max-width: 600px) {
+  .knowledge-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 </style>

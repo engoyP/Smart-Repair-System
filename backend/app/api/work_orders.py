@@ -20,6 +20,7 @@ from app.schemas import (
 )
 from app.agents.ticket_agent import ticket_agent
 from app.agents.knowledge_extractor import knowledge_extractor
+from app.agents.tools import extract_error_codes
 from app.models.knowledge import KnowledgeItem, KnowledgeStatus
 
 router = APIRouter()
@@ -492,6 +493,7 @@ def _auto_publish_knowledge(wo: WorkOrder, db: Session) -> bool:
         "fault_description": wo.fault_description,
         "fault_code": wo.fault_code,
         "device_error_code": wo.device_error_code,   # 设备运行日志错误码（SV0436 等），提取器可识别
+        "log_text": wo.log_text,                     # 日志原文：仅用于抠码/信号词，不整段进正文
         "fault_phenomenon": wo.fault_phenomenon,
         "root_cause": wo.root_cause,
         "solution_steps": wo.solution_steps,
@@ -532,6 +534,7 @@ def _auto_publish_knowledge(wo: WorkOrder, db: Session) -> bool:
             "dedup_score": dedup.similarity_score,
             "keywords": extracted.keywords,
             "device_error_code": wo.device_error_code,
+            "log_error_codes": extract_error_codes(wo.log_text or "") or [],
         },
     )
     db.add(knowledge)

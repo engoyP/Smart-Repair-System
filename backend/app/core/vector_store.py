@@ -8,6 +8,21 @@ import uuid
 from loguru import logger
 
 
+def _entity_field(hit, key: str, default=""):
+    """从 Milvus Hit 提取字段值（兼容 entity 为 Hit 对象或 dict）
+
+    pymilvus>=2.4 中 hit.entity 是 Hit 对象，get(key) 不接受默认值参数；
+    hit.entity.fields 才是字段 dict。此处统一走 fields，兼容旧版 entity 为 dict 的情况。
+    """
+    ent = hit.entity
+    fields = getattr(ent, "fields", None)
+    if isinstance(fields, dict):
+        return fields.get(key, default)
+    if isinstance(ent, dict):
+        return ent.get(key, default)
+    return default
+
+
 class VectorStore:
     """Milvus 向量存储服务封装（懒加载模式，支持多集合泛化）
 
@@ -258,12 +273,12 @@ class VectorStore:
                     output.append({
                         "id": hit.id,
                         "score": hit.score,
-                        "knowledge_id": hit.entity.get("knowledge_id"),
-                        "title": hit.entity.get("title", ""),
-                        "content": hit.entity.get("content", ""),
-                        "device_type": hit.entity.get("device_type", ""),
-                        "fault_code": hit.entity.get("fault_code", ""),
-                        "fault_tags": hit.entity.get("fault_tags", [])
+                        "knowledge_id": _entity_field(hit, "knowledge_id"),
+                        "title": _entity_field(hit, "title", ""),
+                        "content": _entity_field(hit, "content", ""),
+                        "device_type": _entity_field(hit, "device_type", ""),
+                        "fault_code": _entity_field(hit, "fault_code", ""),
+                        "fault_tags": _entity_field(hit, "fault_tags", [])
                     })
 
         return output
@@ -315,6 +330,17 @@ class VectorStore:
             return True
         except Exception as e:
             logger.error(f"向量删除失败: {e}")
+            return False
+
+    def delete_by_knowledge_id(self, knowledge_id: int) -> bool:
+        """删除指定 knowledge_id 的全部向量（幂等同步/重灌用，可安全重跑）"""
+        self._lazy_init()
+        try:
+            self._collection.delete(expr=f'knowledge_id == {knowledge_id}')
+            logger.debug(f"knowledge_id={knowledge_id} 旧向量已删除")
+            return True
+        except Exception as e:
+            logger.error(f"删除 knowledge_id={knowledge_id} 向量失败: {e}")
             return False
 
     def get_by_id(self, point_id: str) -> Optional[Dict]:
@@ -443,9 +469,9 @@ class LogCodeVectorStore(VectorStore):
         "title", "description", "chapter", "page",
     ]
 
-    def __init__(self):
+    def __init__(self, collection_name: Optional[str] = None):
         super().__init__(
-            collection_name=settings.MILVUS_LOG_CODE_COLLECTION,
+            collection_name=collection_name or settings.MILVUS_LOG_CODE_COLLECTION,
             fields=self._LOG_CODE_FIELDS,
             description="设备手册错误码-故障诊断向量集合",
         )
@@ -556,14 +582,14 @@ class LogCodeVectorStore(VectorStore):
                     output.append({
                         "id": hit.id,
                         "score": hit.score,
-                        "manual_code_id": hit.entity.get("manual_code_id"),
-                        "error_code": hit.entity.get("error_code", ""),
-                        "manual_name": hit.entity.get("manual_name", ""),
-                        "device_type": hit.entity.get("device_type", ""),
-                        "title": hit.entity.get("title", ""),
-                        "description": hit.entity.get("description", ""),
-                        "chapter": hit.entity.get("chapter", ""),
-                        "page": hit.entity.get("page", ""),
+                        "manual_code_id": _entity_field(hit, "manual_code_id"),
+                        "error_code": _entity_field(hit, "error_code", ""),
+                        "manual_name": _entity_field(hit, "manual_name", ""),
+                        "device_type": _entity_field(hit, "device_type", ""),
+                        "title": _entity_field(hit, "title", ""),
+                        "description": _entity_field(hit, "description", ""),
+                        "chapter": _entity_field(hit, "chapter", ""),
+                        "page": _entity_field(hit, "page", ""),
                     })
 
         return output

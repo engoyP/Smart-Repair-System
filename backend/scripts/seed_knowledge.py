@@ -18,10 +18,19 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from sqlalchemy.orm import Session
 from loguru import logger
 
+from app.core.config import settings
 from app.core.database import SessionLocal
 from app.models.knowledge import KnowledgeItem, KnowledgeStatus
 from app.core.vector_store import vector_store
-from app.core.embeddings import encode_text
+from app.core.embeddings import encode_text, is_server_available
+
+
+def check_inference_server():
+    """推理服务连通性检查（服务化后，向量脚本必须先启动推理服务）"""
+    if not is_server_available():
+        logger.error(f"推理服务不可用: {settings.EMBEDDING_SERVER_URL}")
+        logger.error("请先启动推理服务：start_all.ps1 或 python -m app.core.embedding_server")
+        sys.exit(1)
 
 # ==================== 200 条维修知识种子数据 ====================
 # 设备类型: 注塑机, 数控机床(CNC), 液压系统, 传送带, 空压机, 变压器, 电机, 锅炉, 制冷系统, 机器人
@@ -135,6 +144,7 @@ SEED_KNOWLEDGE.extend(_generate_extra())
 
 def seed_knowledge():
     """主导入函数"""
+    check_inference_server()
     logger.info(f"开始导入 {len(SEED_KNOWLEDGE)} 条知识条目...")
 
     db: Session = SessionLocal()
@@ -169,7 +179,7 @@ def seed_knowledge():
                 db.flush()  # 获得 knowledge.id
 
                 # 2. 写入 Milvus 向量库
-                text_for_embedding = f"{item['title']}\n{item['content'][:500]}"
+                text_for_embedding = f"{item['title']}\n{item['content'][:settings.MAX_VECTOR_CONTENT_LEN]}"
                 vector = encode_text(text_for_embedding)
 
                 point_id = vector_store.insert(

@@ -1,12 +1,5 @@
 <template>
   <div class="page">
-    <div class="page-header">
-      <h2 class="page-title">知识库</h2>
-      <div class="header-actions">
-        <el-button type="primary" @click="$router.push('/knowledge/new')">新增知识</el-button>
-      </div>
-    </div>
-
     <div class="knowledge-layout">
       <!-- 右侧知识列表 -->
       <div class="list-area">
@@ -145,10 +138,6 @@ const handleDedupCheck = async (row) => {
 onMounted(() => { fetchData() })</script>
 
 <style scoped>
-.page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
-.page-title { font-size: 20px; font-weight: 600; color: var(--color-text-primary); }
-.header-actions { display: flex; gap: 12px; }
-
 .knowledge-layout { display: flex; gap: 0; align-items: flex-start; }
 
 .list-area { width: 100%; min-width: 0; }

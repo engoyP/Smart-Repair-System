@@ -199,7 +199,7 @@ class GuidedRepairAgent:
     def start_session(self, description: str, device_type: str = "") -> str:
         """创建新会话，返回 session_id（会话持久化到 Redis）"""
         import uuid
-        sid = str(uuid.uuid4())[:8]
+        sid = str(uuid.uuid4())
         self._save_session(sid, {
             "device_type": device_type,
             "initial_symptoms": description,
@@ -210,34 +210,23 @@ class GuidedRepairAgent:
         return sid
 
     def _search_knowledge(self, query: str, device_type: str = "") -> List[Dict]:
-        """检索知识库，返回匹配案例"""
+        """检索知识库（公共编排层）：向量 + BM25 → RRF → 粗筛 → 模型/规则精排 → 验证取 top3"""
         try:
-            from app.agents.tools import RetrievalTools
-            from app.core.database import SessionLocal
-            from app.core.vector_store import vector_store
-            from app.core.embeddings import encode_text
-            tools = RetrievalTools(
-                db_session_factory=SessionLocal,
-                vector_store=vector_store,
-                embedding_fn=encode_text,
+            from app.agents.retrieval_flow import make_tools, retrieve_hybrid, filter_rerank_cases
+            tools = make_tools()
+            merged, error_codes, tools = retrieve_hybrid(
+                query, top_k=10, device_type=device_type,
             )
-            v_result = tools.vector_search(query, top_k=5, device_type=device_type, score_threshold=0.0)
-            b_result = tools.bm25_search(query, top_k=5, device_type=device_type)
-
-            result_sets = []
-            if v_result.success:
-                result_sets.append(v_result.data)
-            if b_result.success:
-                result_sets.append(b_result.data)
-
-            from app.agents.tools import rrf_merge, weighted_rerank
-            merged = rrf_merge(result_sets, top_n=5) if result_sets else []
-            merged = [m for m in merged if not m.get("rrf_only", False) and m.get("score", 0) >= 0.15]
-            cleaned_q = tools.query_extractor.extract(query, use_llm_fallback=False)
-            merged = weighted_rerank(merged, query, fault_weight=0.4, device_penalty=0.15,
-                                     cleaned_query=cleaned_q)
-            merged.sort(key=lambda x: x.get("score", 0), reverse=True)
-            return merged[:3]
+            cases = filter_rerank_cases(
+                tools, merged, query, top_n=5, error_codes=error_codes,
+            )
+            try:
+                from app.agents.verify_agent import verify_agent
+                verified, _report = verify_agent.verify(query, cases, device_type=device_type)
+                return verified[:3]
+            except Exception as e:
+                logger.warning(f"[GuidedRepair] 验证降级，返回原检索结果: {e}")
+                return cases[:3]
         except Exception as e:
             logger.error(f"[GuidedRepair] 知识检索失败: {e}")
             return []

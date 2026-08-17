@@ -1,6 +1,7 @@
 """检索工具集 - 向量检索 / BM25 关键词检索 / 条件查询 / RRF 融合 / 查询改写"""
 import json
 import re
+import time
 from typing import List, Dict, Optional, Callable, Any, Set, Tuple
 from dataclasses import dataclass, field
 from loguru import logger
@@ -435,16 +436,52 @@ _RRF_ALERTED_METHODS: set = set()
 # ==================== 错误码提取（设备日志/报警码） ====================
 
 # 错误码形态：SV0436 / ALM-6401 / E3091 / R0910 / PS0002 / EX1006
-_ERROR_CODE_RE = re.compile(r'[A-Za-z]{1,6}[-\s]?\d{2,6}')
+# 边界守卫：前后不能是字母/数字/斜杠（防 "S/N 20260015" 抠出 N202600、防长数字串截头），
+# 数字部分后不能紧跟数字（防 8 位序列号截取前 6 位）
+_ERROR_CODE_RE = re.compile(r'(?<![A-Za-z0-9/])[A-Za-z]{1,6}[-\s]?\d{2,6}(?!\d)')
+_NUMERIC_TOKEN_RE = re.compile(r'(?<!\d)\d{4,6}(?!\d)')
+
+# 纯数字错误码白名单缓存（码表 = manual_code_entries.error_code distinct）
+# 纯数字 token（时间戳/数值/序列号）与真报警码无法从形态区分，只能在码表内匹配
+_ERROR_CODE_WHITELIST: Optional[Set[str]] = None
+_ERROR_CODE_WHITELIST_LOADED_AT: float = 0
+_ERROR_CODE_WHITELIST_TTL = 300  # 5 分钟
 
 
-def extract_error_codes(query: str) -> List[str]:
-    """从提问中提取错误码/报警码（如 SV0436 / ALM-6401 / E3091 / 6401）
+def _load_error_code_whitelist() -> Set[str]:
+    """加载手册表中的全部错误码（大写归一化），用于纯数字码白名单过滤"""
+    global _ERROR_CODE_WHITELIST, _ERROR_CODE_WHITELIST_LOADED_AT
+    now = time.time()
+    if _ERROR_CODE_WHITELIST is not None and (now - _ERROR_CODE_WHITELIST_LOADED_AT) < _ERROR_CODE_WHITELIST_TTL:
+        return _ERROR_CODE_WHITELIST
+    try:
+        from app.core.database import SessionLocal
+        from app.models.manual_code import ManualCodeEntry
+        db = SessionLocal()
+        try:
+            rows = db.query(ManualCodeEntry.error_code).distinct().all()
+            _ERROR_CODE_WHITELIST = {(r[0] or "").strip().upper() for r in rows if r[0]}
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning(f"[extract_error_codes] 错误码白名单加载失败（纯数字码将全部不提取）: {e}")
+        _ERROR_CODE_WHITELIST = set()
+    _ERROR_CODE_WHITELIST_LOADED_AT = now
+    return _ERROR_CODE_WHITELIST
+
+
+def extract_error_codes(query: str, whitelist: Optional[Set[str]] = None) -> List[str]:
+    """从提问/日志原文中提取错误码/报警码（如 SV0436 / ALM-6401 / E3091 / 6401）
 
     规则：
     - 字母+数字混合 token（SV0436 / ALM-6401 / E3091 / R0910 / PS0002）
-      → 去分隔符 + 转大写归一化（"ALM-6401" → "ALM6401"）
-    - 纯数字 4~6 位（6401 / 0401）→ 可能是报警码，排除年份（19xx / 20xx）
+      → 去分隔符 + 转大写归一化（"ALM-6401" → "ALM6401"）；混合形态天然防误抠，自由匹配
+    - 纯数字 4~6 位（6401 / 0401）→ 仅当命中码表白名单（手册表收录的错误码）才保留，
+      排除年份（19xx / 20xx）与时间戳/数值/序列号等非报警数字
+
+    Args:
+        query: 提问或日志原文
+        whitelist: 可选，调用方注入的码表；默认按需从 manual_code_entries 加载（TTL 缓存）
 
     Returns:
         归一化后的错误码列表（可能为空）
@@ -454,17 +491,24 @@ def extract_error_codes(query: str) -> List[str]:
         return []
 
     # 1. 字母+数字混合错误码
-    for m in _ERROR_CODE_RE.finditer(query):
+    mixed_matches = list(_ERROR_CODE_RE.finditer(query))
+    for m in mixed_matches:
         tok = re.sub(r'[\s-]', '', m.group(0)).upper()
         if len(tok) >= 3 and not tok.isdigit():
             codes.add(tok)
 
-    # 2. 纯数字 4~6 位报警码（排除年份）
-    for m in re.finditer(r'\d{4,6}', query):
+    # 2. 纯数字 4~6 位报警码：白名单过滤（排除年份/时间戳/数值）
+    #    先剔除已匹配的混合码片段（防 "ALM-6401" 再单独抠出 "6401"），再找独立数字串
+    allowed = whitelist if whitelist is not None else _load_error_code_whitelist()
+    numeric_text = query
+    for m in mixed_matches:
+        numeric_text = numeric_text[:m.start()] + ' ' * (m.end() - m.start()) + numeric_text[m.end():]
+    for m in _NUMERIC_TOKEN_RE.finditer(numeric_text):
         tok = m.group(0)
         if len(tok) == 4 and tok.startswith(('19', '20')):
             continue
-        codes.add(tok)
+        if allowed and tok in allowed:
+            codes.add(tok)
 
     return sorted(codes)
 
@@ -588,7 +632,7 @@ class RetrievalTools:
         top_k: int = 10,
         device_type: Optional[str] = None,
         fault_code: Optional[str] = None,
-        score_threshold: float = 0.3
+        score_threshold: Optional[float] = None,
     ) -> ToolResult:
         """
         向量语义检索 - 基于 embedding 相似度从 Milvus 检索相关知识
@@ -598,8 +642,11 @@ class RetrievalTools:
             top_k: 返回结果数
             device_type: 可选 - 按设备类型过滤
             fault_code: 可选 - 按故障码过滤
-            score_threshold: 相似度阈值
+            score_threshold: 相似度阈值（None 时取配置 RETRIEVAL_VECTOR_THRESHOLD）
         """
+        if score_threshold is None:
+            from app.core.config import settings
+            score_threshold = settings.RETRIEVAL_VECTOR_THRESHOLD
         try:
             # ===== 关键优化：用白名单+LLM提取技术关键词，避免语义向量被干扰词带偏 =====
             cleaned_query = self.query_extractor.extract(query) or query
@@ -776,6 +823,32 @@ class RetrievalTools:
 
     # ---------- Tool 2.5: 设备手册错误码检索（log_code 库，双路） ----------
 
+    @staticmethod
+    def _manual_row_to_dict(row) -> Dict:
+        """ManualCodeEntry ORM 行 → 检索统一 dict（精确路与向量路 enrichment 共用）"""
+        from app.core.manual_text import build_manual_content_text
+        data = {
+            "_dedup_key": f"M:{row.id}",   # 跨库复合键（与知识条目 K: 区分）
+            "id": f"manual-{row.id}",      # 展示用 id
+            "manual_code_id": row.id,
+            "error_code": row.error_code,
+            "title": row.title,
+            "description": row.description or "",
+            "message_text": row.message_text or "",
+            "severity": row.severity or "",
+            "effect": row.effect or "",
+            "conditions": row.conditions or [],
+            "related_codes": row.related_codes or [],
+            "causes": row.causes or "",
+            "solutions": row.solutions or "",
+            "manual_name": row.manual_name,
+            "device_type": row.device_type or "",
+            "chapter": row.chapter or "",
+            "page": row.page or "",
+        }
+        data["content"] = build_manual_content_text(data)
+        return data
+
     def manual_code_search(
         self,
         error_codes: List[str],
@@ -805,28 +878,10 @@ class RetrievalTools:
 
                 items = []
                 for row in rows:
-                    content_parts = [row.description or ""]
-                    if row.causes:
-                        content_parts.append(f"原因：{row.causes}")
-                    if row.solutions:
-                        content_parts.append(f"处理：{row.solutions}")
-                    items.append({
-                        "_dedup_key": f"M:{row.id}",   # 跨库复合键（与知识条目 K: 区分）
-                        "id": f"manual-{row.id}",      # 展示用 id
-                        "manual_code_id": row.id,
-                        "error_code": row.error_code,
-                        "title": row.title,
-                        "content": "\n".join(content_parts),
-                        "description": row.description or "",
-                        "causes": row.causes or "",
-                        "solutions": row.solutions or "",
-                        "manual_name": row.manual_name,
-                        "device_type": row.device_type or "",
-                        "chapter": row.chapter or "",
-                        "page": row.page or "",
-                        "score": 1.0,                  # 精确匹配给满分（作为显示分）
-                        "method": "manual_code_exact",
-                    })
+                    item = self._manual_row_to_dict(row)
+                    item["score"] = 1.0          # 精确匹配给满分（作为显示分）
+                    item["method"] = "manual_code_exact"
+                    items.append(item)
                 return ToolResult(
                     success=True,
                     data=items,
@@ -847,6 +902,9 @@ class RetrievalTools:
     ) -> ToolResult:
         """手册错误码语义检索——对提问文本编码后向量搜索 log_code 集合
 
+        Milvus 集合只存基础字段（无 causes/solutions/conditions），向量命中后
+        按 manual_code_id 回查 PG enrichment 补全字段（PG 已删的脏点跳过）。
+
         Args:
             query: 用户提问（自然语言，如"主轴过流报警"）
             top_k: 返回结果数
@@ -858,6 +916,7 @@ class RetrievalTools:
         """
         try:
             from app.core.vector_store import log_code_store
+            from app.models.manual_code import ManualCodeEntry
             cleaned = self.query_extractor.extract(query) or query
             query_vector = self.encode(cleaned)
             results = log_code_store.search(
@@ -866,14 +925,40 @@ class RetrievalTools:
                 device_type=device_type,
                 score_threshold=score_threshold,
             )
+            if not results:
+                return ToolResult(
+                    success=True,
+                    data=[],
+                    metadata={"method": "manual_vector_search", "count": 0},
+                )
+
+            # PG 回查 enrichment：补全 causes/solutions/conditions/message_text 等新字段
+            ids = [r.get("manual_code_id") for r in results if r.get("manual_code_id") is not None]
+            by_id: Dict[int, Any] = {}
+            if ids:
+                db = self.db_factory()
+                try:
+                    rows = db.query(ManualCodeEntry).filter(ManualCodeEntry.id.in_(ids)).all()
+                    by_id = {row.id: row for row in rows}
+                finally:
+                    db.close()
+
+            enriched = []
             for r in results:
-                r["_dedup_key"] = f"M:{r.get('manual_code_id')}"
-                r["content"] = r.get("description", "")
-                r["method"] = "manual_vector_search"
+                row = by_id.get(r.get("manual_code_id"))
+                if row is None:
+                    continue   # PG 已删而 Milvus 残留的脏点，跳过
+                item = self._manual_row_to_dict(row)
+                item.update({
+                    "score": round(float(r.get("score", 0)), 4),
+                    "milvus_point_id": r.get("id"),
+                    "method": "manual_vector_search",
+                })
+                enriched.append(item)
             return ToolResult(
                 success=True,
-                data=results,
-                metadata={"method": "manual_vector_search", "count": len(results)},
+                data=enriched,
+                metadata={"method": "manual_vector_search", "count": len(enriched)},
             )
         except Exception as e:
             logger.error(f"手册错误码语义检索失败: {e}")

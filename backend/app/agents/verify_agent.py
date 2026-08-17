@@ -173,7 +173,7 @@ class VerifyAgent:
             merged, codes, tools = retrieve_hybrid(q, top_k=10, device_type=dev, fault_code=None)
             device, kws = extract_device_and_fault(tools, q)
             return filter_rerank_cases(
-                tools, merged, q, top_n=8,
+                tools, merged, q,
                 require_device=device if not strategy.get("loosen_device") else "",
                 require_keywords=tuple(kws),
                 error_codes=codes or error_codes,

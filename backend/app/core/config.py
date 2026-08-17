@@ -76,12 +76,28 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     LOG_FILE: str = "logs/app.log"
 
-    # Embedding 服务配置（OpenAI 兼容接口，供 RAGFlow 等外部系统调用）
+    # Embedding / Rerank 推理服务配置（OpenAI 兼容，供主链路 HTTP 调用 + RAGFlow 等外部系统调用）
+    EMBEDDING_SERVER_URL: str = "http://localhost:8010"   # 推理服务地址（主链路编码/重排走这里）
     EMBEDDING_SERVER_HOST: str = "0.0.0.0"
     EMBEDDING_SERVER_PORT: int = 8010
-    EMBEDDING_MODEL_NAME: str = "Qwen3-Embedding-0.6B"
+    EMBEDDING_MODEL_NAME: str = "BAAI/bge-m3"             # 召回模型（1024 维）
     EMBEDDING_MAX_LENGTH: int = 512
     EMBEDDING_LOG_FILE: str = "logs/embedding_server.log"
+    RERANKER_MODEL_NAME: str = "Qwen/Qwen3-Reranker-0.6B" # 精排模型
+    RERANKER_ENABLED: bool = True                          # 模型重排总开关（纯 CPU 延迟敏感时可关）
+    RERANKER_CANDIDATES: int = 30                          # 送入重排模型的候选条数
+
+    # 检索链路参数
+    RECALL_TOP_K: int = 30        # 各路召回 top-k（向量/BM25），RRF 融合后候选池
+    FINAL_TOP_N: int = 10         # 重排后最终送 LLM 的条数
+    RETRIEVAL_COARSE_THRESHOLD: float = 0.15   # 粗筛：RRF 融合后向量相似度下限
+    RETRIEVAL_VECTOR_THRESHOLD: float = 0.3    # 单路向量检索阈值（quick/knowledge 搜索）
+    DEDUP_CANDIDATE_THRESHOLD: float = 0.45    # 去重：向量候选召回阈值
+    DEDUP_LLM_THRESHOLD: float = 0.55          # 去重：触发 LLM 判定阈值
+    AGENT_QUALITY_HIGH_SCORE: float = 0.6      # 检索 Agent 质量判定："高分"单条线
+    AGENT_QUALITY_TARGET_SCORE: float = 0.7    # 检索 Agent 质量判定：最高分达标线
+    MAX_VECTOR_CONTENT_LEN: int = 500          # 向量编码文本 content 截断长度（各写入路径统一）
+    MAX_MANUAL_VECTOR_TEXT_LEN: int = 1200     # 手册条目向量编码文本截断长度（error_code+title+message_text+description+前3情形信号）
 
     # 追踪后端选择：ragflow | langfuse | local
     TRACING_BACKEND: str = "ragflow"

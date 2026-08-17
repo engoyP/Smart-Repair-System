@@ -66,7 +66,7 @@ class RetrievalAssistantAgent:
 
     MAX_ITERATIONS = 5                # ReAct 循环硬上限：最多 5 轮（防死循环）
     MIN_RESULTS_FOR_QUALITY = 3       # 质量达标的最低结果数：≥3 条
-    MIN_SCORE_FOR_QUALITY = 0.6       # "高分"判定线：单条分数 ≥0.6 算高分
+    MIN_SCORE_FOR_QUALITY = settings.AGENT_QUALITY_HIGH_SCORE       # "高分"判定线：单条分数 ≥0.6 算高分
 
     def __init__(self, tools: RetrievalTools):
         self.tools = tools            # 检索工具集（vector/bm25/conditional/graph/rewrite）
@@ -204,7 +204,7 @@ class RetrievalAssistantAgent:
                     top_k=thought.get("top_k", 10),
                     device_type=device_type,
                     fault_code=fault_code,
-                    score_threshold=thought.get("score_threshold", 0.3),
+                    score_threshold=thought.get("score_threshold", settings.RETRIEVAL_VECTOR_THRESHOLD),
                 )
                 step.tool_input = {"query": current_query, "method": "vector_search"}
 
@@ -410,7 +410,7 @@ class RetrievalAssistantAgent:
         max_score = max(r.get("score", 0) for r in results)
 
         # 达标条件：≥3条 且（≥2条高分 或 最高分≥0.7）
-        if len(results) >= self.MIN_RESULTS_FOR_QUALITY and (high_score_count >= 2 or max_score >= 0.7):
+        if len(results) >= self.MIN_RESULTS_FOR_QUALITY and (high_score_count >= 2 or max_score >= settings.AGENT_QUALITY_TARGET_SCORE):
             return {"sufficient": True, "reason": f"结果充足 ({len(results)} 条, 最高分 {max_score:.2f})"}
 
         # 到最后一轮：无论如何强制算"够"（硬性结束，防死循环）

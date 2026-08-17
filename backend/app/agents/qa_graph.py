@@ -17,6 +17,7 @@ from typing import Optional, Any, TypedDict
 
 from loguru import logger
 from langgraph.graph import StateGraph, END
+from app.core.config import settings
 
 
 class QaState(TypedDict, total=False):
@@ -105,7 +106,7 @@ def fault_retrieve_node(state: QaState) -> dict:
     """双库检索（公共编排层）：知识库 vector+BM25 + 手册错误码路 → RRF 融合"""
     from app.agents.retrieval_flow import retrieve_hybrid
     q = state.get("question") or ""
-    top_k = state.get("top_k") or 10
+    top_k = state.get("top_k") or settings.RECALL_TOP_K
     try:
         merged, error_codes, tools = retrieve_hybrid(
             q, top_k=top_k, device_type=state.get("device_type"),
@@ -129,12 +130,12 @@ def fault_filter_node(state: QaState) -> dict:
     if tools is not None:
         device, kws = extract_device_and_fault(tools, q)
         filtered = filter_rerank_cases(
-            tools, cases, q, top_n=8,
+            tools, cases, q,
             require_device=device, require_keywords=tuple(kws),
             error_codes=error_codes,
         )
     else:
-        filtered = [m for m in cases if not m.get("rrf_only", False) and m.get("score", 0) >= 0.15][:8]
+        filtered = [m for m in cases if not m.get("rrf_only", False) and m.get("score", 0) >= settings.RETRIEVAL_COARSE_THRESHOLD][:settings.FINAL_TOP_N]
 
     payload["cases"] = filtered
     return {"payload": payload}

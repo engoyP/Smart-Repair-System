@@ -68,6 +68,7 @@ class KnowledgeExtractorAgent:
         solution_steps = work_order_data.get("solution_steps", "")
         device_type = work_order_data.get("device_type", "")
         tags = work_order_data.get("tags", [])
+        log_text = work_order_data.get("log_text", "")
 
         if not fault_description:
             return ExtractedKnowledge()
@@ -80,6 +81,7 @@ class KnowledgeExtractorAgent:
             solution_steps=solution_steps,
             device_type=device_type,
             tags=tags,
+            log_text=log_text,
         )
 
         logger.info(f"[KnowledgeExtractor] 提取完成: {result.title[:50] if result.title else '空'}...")
@@ -94,6 +96,7 @@ class KnowledgeExtractorAgent:
         solution_steps: str,
         device_type: str,
         tags: List[str],
+        log_text: str = "",
     ) -> ExtractedKnowledge:
         """调用 LLM 提取知识（带 LangFuse 追踪）"""
 
@@ -121,10 +124,17 @@ class KnowledgeExtractorAgent:
   - ...
   ```
 
-- **fault_code**: 工单中的故障码，如无则为空
+- **fault_code**: 工单中的故障码，如无则为空；工单附带"设备日志原文"时，从日志中提取报警码（如 SV0436）并入 fault_code
 - **device_type**: 设备类型
-- **fault_tags**: 3-5个关键词标签（用于分类和检索）
+- **fault_tags**: 3-5个关键词标签（用于分类和检索），工单附带日志原文时可从中提取报警码/信号词作为标签
 - **keywords**: 3-5个用于去重比对的关键词/短语（提取最具区分度的关键词）
+
+## 设备日志原文处理规则（重要）
+工单可能附带"设备日志原文"（维修工粘贴的设备屏幕/日志文本，含时间戳、十六进制行等噪音）：
+1. 日志原文**仅用于提取错误码/报警码与信号词**，写入 fault_code / fault_tags；
+2. **不得把日志原文整段粘贴进 content**——日志噪音会污染知识检索质量；
+3. content 中可以有一句摘要式引用（如"设备日志显示 SV0436 过电流报警"），但不得含时间戳/十六进制行；
+4. 日志中提取不到有效信息时忽略该字段。
 
 ## 返回格式（严格 JSON）：
 {
@@ -145,6 +155,7 @@ class KnowledgeExtractorAgent:
 - 故障现象：{fault_phenomenon or '未填写'}
 - 根本原因：{root_cause or '未填写'}
 - 解决方案：{solution_steps or '未填写'}
+- 设备日志原文：{log_text[:500] if log_text else '未填写'}
 - 已有标签：{', '.join(tags) if tags else '无'}
 
 请提取知识条目，返回 JSON。"""

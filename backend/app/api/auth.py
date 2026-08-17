@@ -287,8 +287,8 @@ def reset_password(req: ResetPasswordRequest, db: Session = Depends(get_db)):
     if not user:
         raise HTTPException(status_code=404, detail="该手机号未绑定任何账号")
 
-    import hashlib
-    user.password_hash = hashlib.sha256(req.new_password.encode()).hexdigest()
+    from app.api.users import pwd_context
+    user.password_hash = pwd_context.hash(req.new_password)
     db.commit()
 
     logger.info(f"[Auth] 密码重置成功: phone={req.phone}, user={user.real_name}")
@@ -324,11 +324,11 @@ def register(req: RegisterRequest, db: Session = Depends(get_db)):
     if existing:
         raise HTTPException(status_code=400, detail="该手机号已注册，请直接登录")
 
-    import hashlib
+    from app.api.users import pwd_context
     from app.models.user import UserRole
     user = User(
         username=req.phone,
-        password_hash=hashlib.sha256(req.password.encode()).hexdigest(),
+        password_hash=pwd_context.hash(req.password),
         real_name=req.real_name,
         phone=req.phone,
         role=UserRole.TECHNICIAN,
@@ -366,7 +366,7 @@ def register_dingtalk(req: DingTalkRegisterRequest, db: Session = Depends(get_db
     if len(req.password) < 6:
         raise HTTPException(status_code=400, detail="密码长度至少6位")
 
-    import hashlib
+    from app.api.users import pwd_context
     from app.models.user import UserRole
 
     # 扫码注册流程
@@ -378,7 +378,7 @@ def register_dingtalk(req: DingTalkRegisterRequest, db: Session = Depends(get_db
 
         user = User(
             username=f"dt_{req.dingtalk_userid}",
-            password_hash=hashlib.sha256(req.password.encode()).hexdigest(),
+            password_hash=pwd_context.hash(req.password),
             real_name=req.real_name,
             dingtalk_userid=req.dingtalk_userid,
             role=UserRole.TECHNICIAN,
@@ -420,7 +420,7 @@ def register_dingtalk(req: DingTalkRegisterRequest, db: Session = Depends(get_db
 
         user = User(
             username=f"dt_{verified_userid}",
-            password_hash=hashlib.sha256(req.password.encode()).hexdigest(),
+            password_hash=pwd_context.hash(req.password),
             real_name=verified_name,
             dingtalk_userid=verified_userid,
             role=UserRole.TECHNICIAN,
@@ -888,8 +888,7 @@ def dingtalk_create_new_account(req: DingTalkCreateNewAccountRequest, db: Sessio
 
     user = User(
         username=username,
-        # 与其他登录接口保持一致用 sha256（bcrypt 有 72 字节限制且与 login 不兼容）
-        password_hash=hashlib.sha256(req.password.encode()).hexdigest(),
+        password_hash=pwd_context.hash(req.password),
         real_name=req.real_name or user_info.get("name", f"钉钉用户_{dt_userid[-4:]}"),
         dingtalk_userid=dt_userid,
         dingtalk_bound_at=datetime.now(),

@@ -8,6 +8,7 @@ from app.core.database import get_db
 from app.core.security import get_current_user
 from app.models.work_order import WorkOrder, WorkOrderStatus
 from app.models.knowledge import KnowledgeItem, KnowledgeStatus
+from app.models.manual_code import ManualCodeEntry
 from app.models.device import Device
 from app.models.spare_part import SparePart
 from app.models.user import User
@@ -44,6 +45,7 @@ def dashboard_stats(
     under_review_knowledge = db.query(func.count(KnowledgeItem.id)).filter(
         KnowledgeItem.status == KnowledgeStatus.UNDER_REVIEW
     ).scalar() or 0
+    total_manual_codes = db.query(func.count(ManualCodeEntry.id)).scalar() or 0
 
     # 设备 & 备件统计
     total_devices = db.query(func.count(Device.id)).scalar() or 0
@@ -81,6 +83,7 @@ def dashboard_stats(
         "today_orders": today_orders,
         "pending_review": pending_review,
         "total_knowledge": total_knowledge,
+        "total_manual_codes": total_manual_codes,
         "published_knowledge": published_knowledge,
         "under_review_knowledge": under_review_knowledge,
         "total_devices": total_devices,

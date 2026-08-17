@@ -59,3 +59,10 @@ _test_*.py
 _check_*.py
 _probe_*.py
 _insert_*.sql
+
+# ===== 本地工具 / Agent 状态（非项目代码）=====
+.claude/
+.trae-html-share-packages/
+
+# ===== 独立调研报告（非系统代码）=====
+factory-equipment-research/

@@ -59,6 +59,15 @@ class AnswerAgent:
    - 手册：`（来源：<手册名>·<章节>·<页码>·错误码 <错误码>）`
    - 工单案例：`（来源：工单案例）`
 
+## 手册条目专用规则（案例含「情形清单」/「严重度」字段时适用）
+
+6. **情形清单已按匹配度排序**：手册条目的情形清单按与用户日志/描述的伴随信号匹配度排序，排在前面的情形更可能是本次故障。输出「可能原因」与「处理方案」时优先引用排在前面的情形，并**保持情形分组**（每个情形的原因与处理步骤成对出现），不得把不同情形的处理步骤混在一起。
+
+7. **严重度表述规则**（按条目的严重度字段决定回答措辞）：
+   - **EX（急停）**：回答开头明示「该报警为急停级，涉及安全回路，请先确认人员安全与急停复位条件」；处理步骤必须逐条列出，不得省略。
+   - **OH（停机）**：按情形给出停机原因排查与恢复步骤；原文提到复位/重启方式时说明（未提到则不写）。
+   - **INFO（提示）**：**开头必须说明「该报警为提示级，设备可能并未发生实际故障」**；先给出快速确认项（原文有才写），再说明不处理可能产生的后果（原文有才写）。
+
 ## 问题类型判断（重要）
 
 根据用户问题的性质，选择以下对应的回答格式：
@@ -84,8 +93,8 @@ class AnswerAgent:
 - 每个部分要展开说明，不要用"测量电压、检查保险丝"这种极简列表
 - 严格基于案例内容，不添加案例中没有的信息"""
 
-    # 案例相关度阈值：低于此分数视为不相关，不送入 LLM
-    SCORE_THRESHOLD = 0.15
+    # 案例相关度阈值：低于此分数视为不相关，不送入 LLM（配置化，换模型后按标定结果调整）
+    SCORE_THRESHOLD = settings.RETRIEVAL_COARSE_THRESHOLD
 
     MULTI_FAULT_PROMPT = """你是一个设备维修知识库的维修专家。用户的问题中描述了同一设备同时出现的多个故障现象，你需要**按故障分组**给出分析。
 
@@ -383,12 +392,17 @@ class AnswerAgent:
             else:
                 source = "工单案例"
                 cite = ""
+            # 手册条目：严重度独立成行，防长 content 截断后 LLM 丢失该信息
+            sev_line = ""
+            if c.get("manual_code_id") and c.get("severity"):
+                sev_label = {"EX": "EX 急停级", "OH": "OH 停机级", "INFO": "INFO 提示级"}.get(c.get("severity"), c.get("severity"))
+                sev_line = f"- 严重度: {sev_label}（{c.get('effect', '')}）\n"
             cases_text += f"""
 ### 案例 {i}（相关度: {score:.0%} · 来源: {source} {cite}）
 - 标题: {title}
 - 设备类型: {device_type}
 - 故障码: {fault_code}
-- 内容:
+{sev_line}- 内容:
 {content}
 
 """
@@ -498,12 +512,17 @@ class AnswerAgent:
             else:
                 source = "工单案例"
                 cite = ""
+            # 手册条目：严重度独立成行，防长 content 截断后 LLM 丢失该信息
+            sev_line = ""
+            if c.get("manual_code_id") and c.get("severity"):
+                sev_label = {"EX": "EX 急停级", "OH": "OH 停机级", "INFO": "INFO 提示级"}.get(c.get("severity"), c.get("severity"))
+                sev_line = f"- 严重度: {sev_label}（{c.get('effect', '')}）\n"
             cases_text += f"""
 ### 案例 {i}（相关度: {score:.0%} · 来源: {source} {cite}）
 - 标题: {title}
 - 设备类型: {device_type}
 - 故障码: {fault_code}
-- 内容:
+{sev_line}- 内容:
 {content}
 
 """

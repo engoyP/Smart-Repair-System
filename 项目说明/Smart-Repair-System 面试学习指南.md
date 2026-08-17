@@ -31,7 +31,7 @@
 | 能力 | 技术实现 |
 |------|----------|
 | 工单全生命周期管理 | FastAPI + PostgreSQL + Alembic |
-| 维修知识库 RAG 检索 | 双库多路（知识向量/BM25 + 手册精确/手册向量）+ RRF 融合 + 加权重排 + 错误码置顶 |
+| 维修知识库 RAG 检索 | 双库多路（知识向量/BM25 + 手册精确/手册向量）+ RRF 融合 + 两级模型精排（bge-m3 召回 / Qwen3-Reranker-0.6B 重排）+ 错误码置顶 |
 | AI 分析型问答 | DeepSeek LLM + 流式 SSE + 五段式结构化回答 + 验证 Agent 三层把关 |
 | 工单智能理解 | LLM 标准化/分类/校验三步走 + 提交时 AI 回填缺失字段 |
 | 引导式追踪维修 | LangGraph 对话状态机 + Redis 会话 |
@@ -70,7 +70,8 @@
 | **langchain-community** | 0.4.2 | 社区集成（工具、向量库适配等） |
 | **LangGraph** | 1.2.6 | StateGraph 状态机，适合钉钉意图路由和引导式维修的多步对话 |
 | **DeepSeek** | deepseek-chat | 国产 LLM，性价比高，中文维修场景效果好 |
-| **Qwen3-Embedding-0.6B** | 本地 Embedding | 阿里出品，1024 维，**本地部署省 API 费用**，取 EOS hidden state + L2 归一化 |
+| **bge-m3**（召回） | 本地 Embedding | BAAI 出品，1024 维，多语言/长文本（8192），**独立推理服务化**（8010，OpenAI 兼容）；仅取 dense 向量（已 L2 归一化） |
+| **Qwen3-Reranker-0.6B**（精排） | 本地 Reranker | cross-encoder：问题×候选联合编码打分，精排阶段替代规则重排，BEIR ~71% |
 
 ### 2.3 数据存储栈
 
@@ -139,7 +140,7 @@
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │  检索编排层 RetrievalFlow（问答/专家/钉钉/MCP 共用）        │   │
 │  │  retrieve_hybrid：查询理解→双库多路召回→RRF融合            │   │
-│  │  filter_rerank_cases：过滤→加权重排→严格过滤→错误码置顶    │   │
+│  │  filter_rerank_cases：过滤→模型精排→严格过滤→错误码置顶    │   │
 │  │  extract_error_codes：纯正则识别错误码→决定 2 路/4 路      │   │
 │  └──────────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────────┐   │
@@ -215,12 +216,14 @@
     │   - 显示分数用向量余弦相似度，BM25 独中显示 0%
     │   - ⚠️ 手册库加入后为"双库最多四路融合"（知识向量/BM25 + 手册精确/手册向量），见 4.1.5
     ▼
-[Step 5] 加权重排 (weighted_rerank)
-    │   - 设备类型不匹配 → ×0.2（压低）
-    │   - 设备匹配 + 故障命中率 < 0.3 → ×0.15
-    │   - 设备匹配 + 故障命中率 ≥ 0.3 → ×(1 + 0.4×ratio)
+[Step 5] 模型精排 (Qwen3-Reranker-0.6B)
+    │   - 召回扩到 top 30（RECALL_TOP_K），RRF 融合后取前 30 条候选
+    │   - reranker 对"问题 × 每条候选"联合编码打分（cross-encoder）
+    │   - 模型分存 rerank_score 独立字段：只排序、不过滤（过滤仍按向量分数）
+    │   - 推理服务不可用 → 自动降级规则重排 weighted_rerank
+    │     （设备不匹配 → ×0.2 / 命中率<0.3 → ×0.15 / ≥0.3 → ×(1+0.4×ratio)）
     ▼
-最终 top_k 案例
+最终 top_k 案例（FINAL_TOP_N=10）
    - 通用过滤：score ≥ 0.15（丢弃低相关案例）
    - 问答 / 专家模式额外叠加"设备 + 故障关键词严格过滤"（见 4.1.4）
 ```
@@ -231,7 +234,7 @@
 2. **(2) RRF 而非简单加权**：RRF 只用排名（rank）不用原始分数，避免向量余弦分数和 BM25 分数量纲不同导致融合失真。`k=60` 是工业界经验值。
 3. **(3) 按 knowledge_id 去重**：向量路返回的 `id` 是 Milvus 的 UUID point_id，BM25 路返回的 `id` 是 PG 主键整数。如果用 `id` 做合并键，同一条工单双路命中无法合并分数。**这是一个真实踩过的坑**。
 4. **(4) 查询清洗**：用户提问里"怎么回事/可能/我你觉得"这些干扰词会严重污染语义向量。清洗后向量更"纯"，召回率显著提升。
-5. **(5) 加权重排的设备惩罚**：设备类型不匹配的案例即使向量分数高也不可信（"注塑机温度高"匹配到"锅炉温度高"），所以压到 0.2 倍。
+5. **(5) 模型精排 + 规则兜底**：精排用 Qwen3-Reranker（cross-encoder，问题×案例联合编码）——它同时"看到"问题和候选全文，比 bi-encoder 向量相似度更能捕捉"设备+故障"的细粒度匹配（"注塑机温度高"匹配到"锅炉温度高"这种跨设备相似会被压低）；规则 `weighted_rerank`（设备不匹配 ×0.2 惩罚）保留为**降级路径**，推理服务不可用时自动顶上。
 
 #### 4.1.3 关键接口
 
@@ -269,7 +272,7 @@ def clean_query_for_retrieval(query) -> str
 | 接口 | 做什么 | 在链路哪一步 |
 |---|---|---|
 | `rrf_merge` | RRF 名次融合：`Σ 1/(k+rank)`，k=60，`_dedup_key` > `knowledge_id` > `id` 去重 | 多路召回之后合并排序（见 4.1.5） |
-| `weighted_rerank` | 加权重排：设备不匹配 ×0.2 / 命中率<0.3→×0.15 / ≥0.3→×(1+0.4×ratio) | RRF 之后拿回分数维度精排（见 4.1.1 Step 5） |
+| `weighted_rerank` | 规则加权重排（**降级路径**）：设备不匹配 ×0.2 / 命中率<0.3→×0.15 / ≥0.3→×(1+0.4×ratio) | 模型精排（Qwen3-Reranker）不可用时的兜底（见 4.1.1 Step 5 / 4.7） |
 | `clean_query_for_retrieval` | 查询清洗：去标点→保护故障词→中文 span 前后缀剥离+中间疑问词替换→还原 | 检索最前置（向量编码/BM25 切词前都过它） |
 
 **一句话总结关系**：
@@ -280,7 +283,7 @@ def clean_query_for_retrieval(query) -> str
   → vector_search + bm25_search（召回，固定双路）
   → (含错误码) manual_code_search + manual_vector_search（手册双路）
   → rrf_merge（融合，纯函数）
-  → weighted_rerank → filter_rerank_cases（精排，纯函数）
+  → Qwen3-Reranker 模型精排（降级：weighted_rerank）→ filter_rerank_cases（精排，纯函数）
   → 喂 LLM
 
 搜索页/专家模式（ReAct）额外：
@@ -295,8 +298,10 @@ def clean_query_for_retrieval(query) -> str
 | 入口 | 端点 | 策略 | 特点 |
 |---|---|---|---|
 | 知识搜索页 | `/agent` | ReAct Agent：LLM 决策选 vector/bm25/conditional/graph，最多 5 轮 | 质量优先，慢，只查不答 |
-| 智能问答 | `/answer/stream` | 固定混合检索（vector+BM25 → RRF → 加权重排 → 严格过滤）→ LLM 五段式回答 | 快、稳；多故障提问会提示切专家模式 |
+| 智能问答 | `/answer/stream` | 固定混合检索（vector+BM25 → RRF → 模型精排 → 严格过滤）→ LLM 五段式回答 | 快、稳；多故障提问会提示切专家模式 |
 | 专家模式 | `/answer/expert` | 多故障拆解（规则预检 + LLM）→ 各故障并行 ReAct（首轮强制双路）→ 分组回答 | 复杂 / 复合问题深度分析 |
+
+> 鉴权差异：`/agent`（搜索页）无需登录；`/answer/stream`、`/answer/expert` 与 `/guided-repair/*` 均需 `Authorization: Bearer <token>`（登录后获取）。
 
 **强制混合检索（`require_hybrid`）**：专家模式首轮不走 LLM 决策，确定性执行 vector + BM25 双路，质量达标直接进 RRF 融合；不达标才进入 LLM 决策循环。解决"ReAct 第一轮选 vector 且达标就早停，混合检索名存实亡"的问题。
 
@@ -304,7 +309,7 @@ def clean_query_for_retrieval(query) -> str
 
 #### 4.1.5 双库四路融合与错误码路由（手册库加入后）
 
-> 公共编排层：`app/agents/retrieval_flow.py`（检索逻辑唯一实现，智能问答/专家/钉钉共用）
+> 公共编排层：`app/agents/retrieval_flow.py`（智能问答/专家/钉钉/验证 Agent 共用；/quick、/hybrid、/manual-lookup、ReAct、追踪维修各自内联）
 
 **不是 4 个库，是 2 个库最多 4 路检索**：
 
@@ -331,7 +336,7 @@ def clean_query_for_retrieval(query) -> str
 
 **② 为什么 RRF 而不是直接比 cos 分数**：① 的向量 cos、② 的 BM25 得分、③ 的精确匹配——三者**分数量纲完全不同**，直接加不科学；RRF 只用名次（`1/(k+rank)`，k=60）跨路求和，天然规避跨源分数归一化。
 
-**③ 融合去重 key 的层级**：`_dedup_key`（复合键，手册 `M:{id}` / 知识 `K:{id}`）> `knowledge_id` > `id`。三个真实坑：
+**③ 融合去重 key 的层级**：`_dedup_key`（复合键，仅手册条目带 `M:{id}`，知识条目不带）> `knowledge_id` > `id`。三个真实坑：
 - 知识库和手册库主键都是 PG 自增 int，纯按 id 去重会**撞号**（知识 id=5 和手册 id=5 被当同一实体合并丢条目）→ 用复合 key 隔离来源
 - 向量路 id 是 Milvus UUID、BM25 路 id 是 PG int，按 id 合并会把"同一条双路命中"拆成两条 → 双路 RRF 分加不上
 
@@ -486,7 +491,7 @@ WHERE (title ILIKE '%温度%' OR content ILIKE '%温度%')
 cos(θ) = (query · 知识) / (|query| × |知识|)
 ```
 
-- 本项目 Embedding（Qwen3-Embedding-0.6B）取 EOS hidden state 后已 **L2 归一化**，向量长度压成 1 → **余弦相似度 = 点积**，Milvus 计算快、索引友好
+- 本项目召回模型 bge-m3 的 dense 输出已 **L2 归一化**，向量长度压成 1 → **余弦相似度 = 点积**，Milvus 计算快、索引友好
 - COSINE 只关心方向、不关心长度——语义相似度场景"方向一致 = 语义相近"（"温度过高"和"温度偏高"向量接近）
 - 归一化后 COSINE 与 L2 欧氏数学上等价（`|A-B|² = 2 - 2cos(A,B)`），但 COSINE 语义更直观
 
@@ -494,7 +499,7 @@ cos(θ) = (query · 知识) / (|query| × |知识|)
 
 | 集合 | 存什么 | 检索入口 | 额外标量过滤 |
 |---|---|---|---|
-| `knowledge` | 知识条目 | `KnowledgeVectorStore.search`（vector_store.py:211） | `device_type` / `fault_code` 表达式 |
+| `knowledge` | 知识条目 | `VectorStore.search`（基类，vector_store.py:211） | `device_type` / `fault_code` 表达式 |
 | `log_code` | 手册错误码 | `LogCodeVectorStore.search`（vector_store.py:509） | `device_type` / `error_code` 表达式 |
 
 两个 search 都支持 `expr` 标量过滤表达式（如 `device_type == "注塑机"`），实现"先按条件过滤候选、再向量精排"。
@@ -561,7 +566,7 @@ async def stream():
 
 **串味治理（检索层）**：问答模式检索后调用与专家模式同一套 `_filter_rerank_cases`：
 1. 过滤 `rrf_only` / 低分（score < 0.15）
-2. `weighted_rerank` 加权重排（故障词权重 0.4、设备不匹配 ×0.2 压低）
+2. **Qwen3-Reranker 模型精排**（降级路径：`weighted_rerank` 规则重排——故障词权重 0.4、设备不匹配 ×0.2 压低）
 3. **严格过滤**：设备类型精确匹配 + 案例标题/正文至少命中一个故障关键词
 4. 严格过滤为空时回退宽松 top2，防止误伤导致"未检索到"
 
@@ -813,35 +818,50 @@ async def achat(self, session_id, message, device_type):
 
 ---
 
-### 4.7 Embedding 服务 — `app/core/embeddings.py`
+### 4.7 检索模型两级架构：bge-m3 召回 + Qwen3-Reranker 精排（推理服务化）
 
-#### 4.7.1 Qwen3-Embedding-0.6B 取向量方法
+> 代码：`app/core/embedding_server.py`（独立推理服务，8010）+ `app/core/embeddings.py`（HTTP 客户端）+ `app/core/reranker.py`（精排客户端）
 
-```python
-# 1. tokenize，末尾加 EOS token (<|endoftext|>)
-inputs = tokenizer(text, add_special_tokens=True)
-# 2. 前向传播，取 last_hidden_state
-last_hidden = model(**inputs).last_hidden_state  # [1, seq_len, 1024]
-# 3. 取 EOS 位置的 hidden state
-seq_lengths = inputs["attention_mask"].sum(dim=1) - 1
-eos_embeddings = last_hidden[arange, seq_lengths]  # [1, 1024]
-# 4. L2 归一化
-eos_embeddings = F.normalize(eos_embeddings, p=2, dim=1)
-```
+**两级模型架构（标准 RAG 分层）**：
 
-**为什么取 EOS 而不是 mean pooling**：Qwen3 官方推荐取 EOS，因为 EOS 汇聚了整个序列的语义信息（类似 BERT 的 [CLS]），效果优于 mean pooling。
+| 阶段 | 模型 | 类型 | 作用 | 分数 |
+|---|---|---|---|---|
+| 召回 | bge-m3 | bi-encoder（dense 1024 维） | 全库粗筛，"别漏" | 余弦相似度 → Milvus ANN |
+| 精排 | Qwen3-Reranker-0.6B | cross-encoder（decoder-only） | 对 top 30 候选细排，"要准" | sigmoid 归一化 0-1 → `rerank_score` |
 
-#### 4.7.2 模型加载策略
+#### 4.7.1 为什么召回用 bi-encoder、精排用 cross-encoder
 
-1. 优先本地路径 `D:\models\Qwen\Qwen3-Embedding-0___6B\models\qwen--Qwen3-Embedding-0.6B\snapshots\master`
-2. 回退 HuggingFace，环境变量 `HF_ENDPOINT=https://hf-mirror.com`（国内镜像）
-3. 设备自动选择 `cuda` / `cpu`
-4. CPU 用 `float32`，CUDA 用 `bfloat16`
-5. **启动时预热**（lifespan 里调 `_load_model()`），避免首次请求超时
+- **bi-encoder**：问题和文档**分别编码**成向量，相似度=向量内积/余弦。可以**预先全库建向量索引**（Milvus ANN），查询毫秒级召回——但两段独立编码、语义交互浅，细粒度匹配（"注塑机温度高" vs "锅炉温度高"）区分弱
+- **cross-encoder**：问题和文档**拼接成一个序列联合编码**，注意力在两者之间充分交互，打分准——但无法预索引，每条候选都要过一次模型，成本高，只能用于候选少（top 30）的精排阶段
+- 所以标准做法是**两级流水线**：bi-encoder 广撒网 → cross-encoder 精修。召回扩到 `RECALL_TOP_K=30`（原 10），RRF 融合后取前 30 条进 reranker；**模型重排只排序、不过滤**（0.15 二次过滤仍按向量分数，模型分存独立字段 `rerank_score`，避免阈值语义混乱）
 
-#### 4.7.3 维度
+#### 4.7.2 推理服务化（进程内 → 独立服务）
 
-`MILVUS_VECTOR_SIZE = 1024`（Qwen3-0.6B 的 hidden_size）
+- **为什么抽服务**：① 模型从进程内加载改为独立服务，后端启动快、不占模型内存；② 一个服务同时供 RAGFlow 等外部系统复用（`/v1/embeddings` OpenAI 兼容）；③ 模型升级/重启只动服务，后端零重启
+- 接口：`POST /v1/embeddings`（OpenAI 兼容，批量编码）、`POST /v1/rerank`（query × documents 批量打分）、`GET /health`（双模型状态 + dim + 加载耗时）
+- 客户端：`embeddings.py` 重写为 HTTP 客户端，**保留同名 API**（`encode_text`/`encode_texts`/`get_vector_dimension`）→ 全部调用点零改动；超时 30s + 重试 2 次 + 失败提示"先启动推理服务"
+- bge-m3 仅用 dense 向量（1024 维，FlagEmbedding 已 L2 归一化）；sparse 稀疏检索本机不用（BM25 路已覆盖关键词匹配，职责不重复）
+
+#### 4.7.3 降级链路（服务不可用 ≠ 系统不可用）
+
+| 故障点 | 降级行为 | 恢复 |
+|---|---|---|
+| 推理服务整体不可用 | 检索自动降级 **BM25-only**（PG 关键词路 + RRF），跳过向量路与 0.15 向量过滤 | 服务恢复自动回弹 |
+| reranker 不可用 | 回退规则 `weighted_rerank`（冷却熔断：连续失败 3 次 → 60s 内不再尝试） | 同上 |
+| 单次编码失败 | 重试 2 次 → 该路失败 → 走 BM25 路 | 同上 |
+
+设计原则：**降级不降可用性**——召回降级保"能答"，精排降级保"准头不崩"，接口不 500。
+
+#### 4.7.4 双形态部署（本机 CPU = 降级形态，生产 = 标准形态）
+
+> **面试关键表述**：本项目是**企业级交付，硬件是本机环境的约束，不是架构的约束**。同一套代码在两种形态下运行，差异只在模型跑在哪：
+
+| 形态 | 部署 | 说明 |
+|---|---|---|
+| 本机开发形态（当前） | 推理服务 CPU 单进程，双模型约 5GB 内存，加载 3-6 分钟 | 功能完整，延迟更高（CPU 上 reranker top30 约 1-3s，可用 `RERANKER_ENABLED` 关精排） |
+| 生产形态 | GPU 单机/多机：vLLM 或 Triton 托管双模型，推理服务多 worker/多副本 + 负载均衡 | 召回/精排延迟降到毫秒-百毫秒级；**代码零改动**，只改 `EMBEDDING_SERVER_URL` 指向生产服务 |
+
+**模型选型与业务代码解耦**：推理服务独立承载模型，后端只通过 `EMBEDDING_SERVER_URL` 指向它；换模型 = 改配置（模型名/路径）+ 重灌向量 + 阈值重标定（见 7.4），零代码改动。
 
 ---
 
@@ -877,7 +897,7 @@ eos_embeddings = F.normalize(eos_embeddings, p=2, dim=1)
 
 **为什么 COSINE 而不是 L2**：
 - 文本 embedding 用余弦相似度衡量语义接近度，与向量的绝对长度无关
-- Qwen3-Embedding 输出已 L2 归一化，COSINE 等价于内积，性能最优
+- bge-m3 dense 输出已 L2 归一化，COSINE 等价于内积，性能最优
 
 #### 4.8.3 懒加载
 
@@ -966,7 +986,7 @@ eos_embeddings = F.normalize(eos_embeddings, p=2, dim=1)
 |------|----------|
 | `User` | id, username, role, dingtalk_user_id, phone |
 | `Device` | id, name, model, device_type, location, status |
-| `WorkOrder` | id, wo_no, device_id, fault_description, fault_code, status(enum), priority, assignee_id, created_at |
+| `WorkOrder` | id, work_order_no, device_id, fault_description, fault_code, status(enum), priority, assignee_id, created_at |
 | `KnowledgeItem` | id, title, content, device_type, fault_code, fault_tags(JSON), status(enum: draft/published), source_type, source_id |
 | `ManualCodeEntry` | id, error_code, title, description, causes, solutions, manual_name, chapter, page（手册错误码权威库） |
 | `WorkOrderProgressLog` | id, work_order_id, from_status, to_status, operator_id, source（工单状态流转留痕） |
@@ -975,7 +995,7 @@ eos_embeddings = F.normalize(eos_embeddings, p=2, dim=1)
 | `DutySchedule` | id, user_id, date, shift, role |
 | `LeaveRequest` | id, user_id, start_date, end_date, type, status |
 | `Notification` | id, user_id, type, content, is_read |
-| `WorkOrderImport` | id, filename, status, total_rows, success_rows |
+| `WorkOrderImportBatch`（models/work_order_import.py） | id, filename, status, total_rows, success_rows |
 
 ### 5.2 工单状态枚举（含迁移历史）
 
@@ -983,8 +1003,13 @@ eos_embeddings = F.normalize(eos_embeddings, p=2, dim=1)
 
 ```python
 # alembic/versions/b7c4d8e1f2a3_add_workorder_status_values.py
-# 修复：ALTER TYPE 必须用 ADD VALUE IF NOT EXISTS，否则重复迁移报错
-op.execute("ALTER TYPE workorderstatus ADD VALUE IF NOT EXISTS 'IN_PROGRESS'")
+# 修复：PG 的 ALTER TYPE ADD VALUE 不支持 IF NOT EXISTS，重复迁移会报 "already exists"，
+#       所以用 try/except 逐个 ADD VALUE，吞掉重复错误
+for val in ['ASSIGNED', 'IN_PROGRESS', 'COMPLETED', 'ARCHIVED', 'STANDARDIZED', 'CLASSIFIED']:
+    try:
+        conn.execute(sa.text(f"ALTER TYPE workorderstatus ADD VALUE '{val}'"))
+    except Exception:
+        pass
 ```
 
 ### 5.3 双库分工
@@ -993,7 +1018,7 @@ op.execute("ALTER TYPE workorderstatus ADD VALUE IF NOT EXISTS 'IN_PROGRESS'")
 |----|------|------|
 | PostgreSQL | 业务事实库 + BM25 全文检索 | 工单/设备/用户/知识/备件 |
 | Milvus | 语义向量检索 | 工单/知识的向量索引 |
-| Redis | 缓存 + 会话 | 24h TTL 活跃会话、检索结果缓存 |
+| Redis | 缓存 + 会话 | 引导维修会话（24h TTL）、查询白名单/LLM 兜底结果等缓存（检索结果本身未缓存，属规划项） |
 
 **为什么不全用 PG pgvector**：项目早期考虑过，但 Milvus 专门为向量优化，IVF_FLAT/HNSW 等索引性能优于 pgvector。配置里保留了 pgvector 作为 fallback 选项（实际未启用）。
 
@@ -1004,10 +1029,10 @@ op.execute("ALTER TYPE workorderstatus ADD VALUE IF NOT EXISTS 'IN_PROGRESS'")
 ### 6.1 Docker Compose 编排
 
 ```yaml
-# docker-compose.yml（start_all.ps1 一键启动使用；docker-compose.dev.yml 额外带 Attu 管理 UI）
+# docker-compose.dev.yml（start_all.ps1 一键启动使用，本项目基础设施编排；根目录 docker-compose.yml 是 RAGFlow 的，勿用）
 services:
   postgres:    # v16, 宿主机 ${DB_PORT:-15432}:5432
-  redis:       # v7, 宿主机 ${REDIS_PORT:-7379}:6379
+  redis:       # v7, 宿主机 ${REDIS_PORT:-6379}:6379（当前 backend/.env 配 7379；重建容器后若映射变 6379 需同步改）
   etcd:        # v3.5.5, Milvus 元数据
   minio:       # 2025-02-28, Milvus 对象存储, 宿主机 ${MINIO_PORT:-9000}:9000 / 控制台 9001
   milvus:      # v2.4.15, 宿主机 ${MILVUS_PORT:-19530}:19530 / REST 9091
@@ -1015,15 +1040,15 @@ services:
 
 ### 6.2 启动顺序
 
-1. Docker 拉起基础设施容器（`docker compose -f docker-compose.yml up -d`）
-2. `alembic upgrade head` 执行数据库迁移
-3. `python scripts/sync_vectors.py` 同步 PG 知识到 Milvus
-4. `python scripts/seed_data.py` 灌种子数据（可选）
-5. `uvicorn app.main:app --host 0.0.0.0 --port 18080` 启动后端
-6. lifespan 预热 Embedding 模型
+1. Docker 拉起基础设施容器（`docker compose -f docker-compose.dev.yml up -d`）
+2. **启动推理服务**（8010）：`python -m app.core.embedding_server`，轮询 `/health` 就绪（双模型 CPU 加载约 3-6 分钟；`start_embedding_server.ps1` 自动轮询）
+3. `alembic upgrade head` 执行数据库迁移
+4. 向量类脚本依赖推理服务已就绪（内置连通性检查，未就绪直接报错退出）：`python scripts/sync_vectors.py` 同步 PG 知识到 Milvus；`seed_knowledge.py` / `import_manual_codes.py` 同理
+5. `python scripts/seed_data.py` 灌种子数据（可选）
+6. `uvicorn app.main:app --host 0.0.0.0 --port 18080` 启动后端（启动时仅探测 `/health`，不加载模型）
 7. `npm run dev` 启动前端（Vite 端口 4173）
 
-> 一键启动：项目根目录 `start_all.ps1`（端口冲突检查 + Docker + 后端 + 前端一起拉起）
+> 一键启动：项目根目录 `start_all.ps1`（端口冲突检查 + Docker → 启动推理服务并**轮询就绪（超时 300s）** → 后端 + 前端一起拉起；推理服务未就绪会明确报错退出，不会带病启动）
 
 ### 6.3 关键环境变量（`.env`）
 
@@ -1035,6 +1060,14 @@ MILVUS_PORT=19530
 MILVUS_COLLECTION=knowledge
 MILVUS_LOG_CODE_COLLECTION=log_code   # 手册错误码向量集合
 MILVUS_VECTOR_SIZE=1024
+EMBEDDING_SERVER_URL=http://localhost:8010  # 推理服务地址（生产形态指向 GPU 服务集群）
+EMBEDDING_MODEL_NAME=BAAI/bge-m3
+RERANKER_MODEL_NAME=Qwen/Qwen3-Reranker-0.6B
+RERANKER_ENABLED=true                        # 精排开关（可关，退回规则重排）
+RECALL_TOP_K=30                              # 召回扩量（进 reranker 前的候选池）
+FINAL_TOP_N=10                               # 重排后送 LLM 的条数
+RETRIEVAL_COARSE_THRESHOLD=0.15              # 粗筛向量相似度下限（标定脚本按分数分布回填，见 7.4）
+DEDUP_CANDIDATE_THRESHOLD=0.45               # 去重候选 / LLM 判定阈值（标定脚本回填，见 7.4）
 DB_HOST=localhost
 DB_PORT=15432                 # 宿主机映射端口（容器内 5432）
 DB_USER=admin
@@ -1053,7 +1086,7 @@ BACKEND_PORT=18080                  # FastAPI 监听端口
 
 ## 7. 项目进行中遇到的问题与解决方案
 
-> 面试被问"项目踩过什么坑 / 遇到过什么问题"时，**只讲这三个**——它们是项目演进的三条主线（检索策略设计 / ReAct 检索 / 知识闭环），每个都讲清"为什么这么设计 + 踩过什么坑 + 解决了什么"，比零散的环境坑更能体现工程深度。对应话术见 Q3（检索策略总纲）/ Q25（ReAct）/ Q26（知识闭环）。
+> 面试被问"项目踩过什么坑 / 遇到过什么问题"时，**只讲这四个**——它们是项目演进的四条主线（检索策略设计 / ReAct 检索 / 知识闭环 / 模型服务化），每个都讲清"为什么这么设计 + 踩过什么坑 + 解决了什么"，比零散的环境坑更能体现工程深度。对应话术见 Q3（检索策略总纲）/ Q25（ReAct）/ Q26（知识闭环）/ Q11（bge-m3 召回）。
 
 ### 7.1 RAG 检索策略的设计（为什么这么设计 + 解决了什么）
 
@@ -1074,7 +1107,7 @@ BACKEND_PORT=18080                  # FastAPI 监听端口
 
 **③ 融合怎么落地（双库最多四路）**
 - **双库四路**：**背景**——开发过程中接入手册库后，用"ALM-6401"实测发现走不到手册权威答案，因为知识库里根本没有这条记录。**设计**：知识库两路（向量 + BM25）总是走；问题含错误码（正则提取，零 LLM）时增开手册库两路（错误码精确 + 手册语义），最多四路
-- **去重键**：**背景**——开发过程中第一次发现同一条工单双路都命中，结果里却出现两条一模一样的卡片（按 Milvus UUID / PG int 分开当了两条）；手册库加入后再次发现知识 5 号和手册 5 号被合并成一条、条目丢失。**设计**：`_dedup_key`（`K:{id}` / `M:{id}`）> `knowledge_id` > `id`——先统一两路口径，再隔离双库撞号
+- **去重键**：**背景**——开发过程中第一次发现同一条工单双路都命中，结果里却出现两条一模一样的卡片（按 Milvus UUID / PG int 分开当了两条）；手册库加入后再次发现知识 5 号和手册 5 号被合并成一条、条目丢失。**设计**：`_dedup_key`（仅手册条目带 `M:{id}`）> `knowledge_id` > `id`——先统一两路口径，再隔离双库撞号
 - **错误码置顶**：**背景**——开发过程中实测"SV0436"提问，精确命中的手册条目（score=1.0）排在第 5 位，被双路命中的泛相似案例压在下面。**设计**：融合过滤后按 `method == manual_code_exact` 置顶
 - **严格过滤**：**背景**——见 ④ 多故障串味。**设计**：设备精确匹配 + 故障词命中（剔除跨设备/泛相似案例），空结果回退宽松 top2 防误伤
 
@@ -1140,6 +1173,27 @@ BACKEND_PORT=18080                  # FastAPI 监听端口
 
 **⑤ 一句话总结（可背）**：闭环解决"知识从哪来"（自动沉淀），去重链解决"知识干不干净"（规则快路径省成本 + 向量筛候选 + LLM 判实质），护栏保证"宁可多收不可误杀"。0.45/0.55 的取值论证见 Q26 ⑤。
 
+### 7.4 两级模型架构的工程化：推理服务化 + 阈值标定 + 降级链路
+
+**设计目标**：检索是"bi-encoder 召回 + cross-encoder 精排"的两级架构——bge-m3 全库召回（bi-encoder，快、可建 ANN 索引）→ Qwen3-Reranker-0.6B 对 top 30 候选精排（cross-encoder，问题×候选联合编码，准），"广撒网 + 精细筛"（原理见 4.7）。模型推理与业务代码解耦、跑在独立推理服务（8010），工程上解决三个问题——**模型加载不阻塞业务、阈值不拍脑袋、服务挂了不拖垮检索**。
+
+**① 为什么推理服务化**
+- 模型从业务进程抽成独立服务（8010，OpenAI 兼容 `/v1/embeddings` + `/v1/rerank`）：后端启动快、不占模型内存；一个服务同时供 RAGFlow 等外部系统复用；模型升级/重启只动服务，后端零重启（见 4.7.2）
+- 本机 CPU 双模型约 5GB、加载 3-6 分钟：后台线程预加载 + `/health` 如实报告 loading/ready/error，启动脚本轮询就绪（超时 300s 明确报错）
+
+**② 坑 1——阈值不能拍脑袋（数据驱动标定）**
+- 检索链路的阈值（`RETRIEVAL_COARSE_THRESHOLD` / `RETRIEVAL_VECTOR_THRESHOLD` / `DEDUP_CANDIDATE_THRESHOLD` / `DEDUP_LLM_THRESHOLD`）直接决定"该召回的召回不回来、该滤掉的滤不掉"，靠经验填不靠谱
+- **解决**：全部阈值配置化 + 写 `scripts/calibrate_thresholds.py` 标定脚本——对代表性查询跑检索、统计 P5/P50/P85/P95 分位数分布，按分位数给建议阈值回填 `.env`（数据驱动，不拍脑袋）
+
+**③ 坑 2——推理服务化后，服务挂 = 全站检索崩？**
+- 编码/重排抽成独立服务后成单点，服务挂了会影响所有检索链路
+- **解决：降级链路（降级不降可用性）**——embedding 不可用 → 自动降级 **BM25-only**（PG 关键词路照常返回，跳过向量路与向量过滤）；reranker 不可用 → 回退规则 `weighted_rerank`（关键词命中率打分，设备不匹配 ×0.2 压低）；服务恢复自动回弹，接口不报错
+
+**④ 配套可观测**
+- `/health` 暴露双模型加载状态 + 加载耗时；降级次数记结构化告警日志；生产 GPU 形态只改 `EMBEDDING_SERVER_URL` 指向 vLLM/SGLang 托管集群，代码零改动（见 4.7.4）
+
+**⑤ 一句话总结（可背）**：两级模型架构（bi-encoder 召回 + cross-encoder 精排）的工程落地靠"**推理服务化（模型与业务解耦）+ 阈值标定（数据驱动）+ 降级链路（不因单点故障全挂）+ 可观测**"四件套——本机 CPU 是降级部署形态，生产 GPU 形态只改配置指向、代码零改动。对应话术见 Q11 / Q24。
+
 ---
 
 ## 8. 高频面试 Q&A
@@ -1176,13 +1230,13 @@ Faiss 不选是因为它是库不是服务，没有持久化、没有高可用�
 
 **② 融合层（解决"排序对不对"）——RRF 名次融合**
 - 四路分数量纲完全不同（cos 0~1 / BM25 无上限 / 精确匹配 1.0），直接加权会被大数值压垮 → 只看名次 `Σ 1/(60+rank)`（原理见 Q4）
-- 去重键三级：`_dedup_key`（`M:{id}` / `K:{id}`）> `knowledge_id` > `id`
+- 去重键三级：`_dedup_key`（仅手册条目带 `M:{id}`）> `knowledge_id` > `id`
 - **坑1（撞号）**：知识库和手册库主键都是 PG 自增 int，按 knowledge_id 会把"知识 5 号"和"手册 5 号"当成同一实体合并，丢条目/张冠李戴 → 复合键带来源前缀隔离
 - **坑2（口径不一）**：向量路 id 是 Milvus UUID、BM25 路 id 是 PG int，按 id 合并会把同一条双路命中拆成两条，双路分加不上 → 统一按 knowledge_id
 
-**③ 过滤层（解决"噪声别进来"）——阈值 + 加权重排 + 严格过滤**
-- 通用过滤：score ≥ 0.15 + 剔除 `rrf_only`（只有 BM25 命中、无语义匹配的不可信）（阈值怎么定见 Q24）
-- `weighted_rerank` 加权重排：故障词权重 0.4、设备不匹配 ×0.2 压低
+**③ 过滤层（解决"噪声别进来"）——阈值 + 模型精排 + 严格过滤**
+- 通用过滤：score ≥ 0.15 + 剔除 `rrf_only`（只有 BM25 命中、无语义匹配的不可信）（阈值怎么定见 Q24；阈值已配置化 + 标定脚本按分数分布回填，见 7.4）
+- **Qwen3-Reranker 模型精排**：召回扩到 top 30，cross-encoder 对"问题×候选"联合打分（`rerank_score`），只排序不过滤；服务不可用自动降级 `weighted_rerank` 规则重排（故障词权重 0.4、设备不匹配 ×0.2 压低）
 - 问答/专家模式叠加**严格过滤**：设备精确匹配 + 故障词至少命中一个，剔除跨设备案例（"数控机床主轴过热"误召回"输送设备电机过热"）和同设备泛相似案例（"黑屏"）
 - **坑3（串味）**：早期"单路向量 + 阈值太松 + 没有设备/故障维度校验"，多故障提问"主轴过热还有换刀故障"会混入黑屏、输送设备电机过热等无关案例 → 治理过程详见 Q22
 - **坑4（权威条目名次吃亏）**：错误码精确命中（score=1.0）只在一路出现，RRF 按名次算排不过双路命中的泛相似案例 → 融合过滤后按 `method == manual_code_exact` 置顶
@@ -1279,15 +1333,16 @@ Faiss 不选是因为它是库不是服务，没有持久化、没有高可用�
 
 ---
 
-### Q11：Qwen3-Embedding 为什么取 EOS token 而不是 mean pooling？
+### Q11：为什么召回模型选 bge-m3？bge-m3 强在哪？（完整故事见 7.4）
 
-**A**：Qwen3 官方推荐取 EOS token 的 hidden state，因为：
-1. EOS 汇聚了整个序列的语义信息（类似 BERT 的 [CLS] token）
-2. 经过 attention 层后，EOS 位置已经"看到"了所有 token
-3. mean pooling 会被停用词稀释（"的/是/了"这种词的向量没语义价值）
-4. L2 归一化后余弦相似度计算更稳定
+**A**：召回模型选了 bge-m3，核心是**召回更强 + 多语言/长文本更稳**：
+1. **bge-m3 是 RAG 检索事实标准**：BAAI 出品，多语言（100+ 语言）检索模型，在 MIRACL（多语言检索基准）上名列前茅；中文维修场景效果优于同尺寸单语模型
+2. **1024 维 dense 向量**：与 Milvus 集合 `MILVUS_VECTOR_SIZE=1024` 对齐，schema / 索引稳定
+3. **长文本上限 8192**：维修案例 content 长，bge-m3 对长文本语义编码更稳（统一截断到 `MAX_VECTOR_CONTENT_LEN=500` 字进编码，见 7.4）
+4. **训练方式**：MCL（多粒度对比学习）联合训练 dense / sparse / colbert 三种表示；只取 dense（1024 维，已 L2 归一化）——sparse 与 BM25 关键词路职责重叠，本机不用
+5. **取向量方式**：`FlagEmbedding.BGEM3FlagModel.encode(return_dense=True)`，dense 向量自带归一化，Milvus COSINE 相似度 = 点积
 
-实测下来，取 EOS 在维修场景的相似度区分度比 mean pooling 高 15-20%。
+> 阈值是"数据标定 + 上线调优"的工程参数：全部收进配置，由 `scripts/calibrate_thresholds.py` 按分数分布的分位数回填（见 7.4）；推理服务不可用时检索自动降级 BM25-only / 规则重排，服务恢复自动回弹（见 4.7.3）。
 
 ---
 
@@ -1376,7 +1431,7 @@ WebSocket 适合双向实时通信（如聊天室），AI 问答场景用 SSE �
 **A**：
 1. **(1) Milvus 索引切换**：IVF_FLAT → HNSW（百万级 HNSW 性能更好），`nlist` 调到 `4*sqrt(N)`，`nprobe` 按召回/延迟实测调优（现有 nlist=1024/nprobe=16 是千级数据量配置，见 4.1.8）
 2. **(2) BM25 优化（三层渐进，见 4.1.7）**：先确认 pg_trgm 索引实际生效（`EXPLAIN` 看是否走 `Bitmap Index Scan`）→ 不够再按设备类型/时间分区 → 仍不够再换 PG 全文检索（`tsvector + tsquery + GIN 索引`）或上 Elasticsearch
-3. **(3) 检索质量演进**：动态阈值（数据量大了固定 0.15 失真，精确查询 0.30 / 模糊查询动态百分位）+ 两阶段检索（召回扩到 top 50~100 再精排选 8）——这两项对"查得准"比纯索引更重要
+3. **(3) 检索质量演进**：动态阈值（数据量大了固定 0.15 失真，精确查询 0.30 / 模糊查询动态百分位；阈值已配置化 + 标定脚本，见 7.4）；两阶段检索**已落地**（召回扩到 top 30 → Qwen3-Reranker 精排 top 10，见 4.7），百万级可进一步扩召回到 50~100 再精排——质量演进对"查得准"比纯索引更重要
 4. **(4) Embedding 批量化**：`encode_texts` 改成真正的批量推理，不是循环 `encode_text`
 5. **(5) 设备分片**：按设备类型预分片，检索 Agent 只查自己设备域的子集合
 6. **(6) 缓存层**：高频 query 的检索结果走 Redis 缓存（`question + device_type` → 结果，知识库版本变更失效），避免重复计算 Milvus/LLM
@@ -1437,9 +1492,9 @@ Judge 判不足时触发**自主重搜循环**（agentic loop）：LLM 规划重
 
 > 我的设计哲学是"**风险定价**"：验证强度与幻觉风险敞口匹配，不是均匀覆盖。
 > - 智能问答是**一次性长回答**（五段式分析），编造空间大 → 放完整验证
-> - 追踪维修是**短回答多轮对话**：每轮只输出一个动作（"检查抱闸 DC24V"），编造空间小；检索 query 每轮叠加用户真实反馈，上下文约束更强；且每轮都过**轻量规则 Gate**（候选为空 / 设备不匹配等客观检查，零成本），首轮和异常轮次走完整验证
+> - 追踪维修是**短回答多轮对话**：每轮只输出一个动作（"检查抱闸 DC24V"），编造空间小；检索 query 每轮叠加用户真实反馈，上下文约束更强；且每轮检索走公共编排层（召回 → 过滤 → 模型精排）并过验证 Agent 复核（**未接完整重搜循环**，重搜是成本最高的环节）
 > - 多轮对话本身是自纠错的：用户反馈进入下一轮检索，错误方向会被下一轮纠正
-> - 所以追踪模式"不是没验证，是分级验证"——这恰恰是同一原则（风险定价）的一致应用
+> - 所以追踪模式未接验证 Agent，靠低幻觉风险的短回答 + 规则过滤 + 对话自纠错兜底（当前没有"分级验证"，这是待补项）
 
 **③ 验证是不是多余？（应对"浪费资源"质疑）**
 
@@ -1460,7 +1515,7 @@ Judge 判不足时触发**自主重搜循环**（agentic loop）：LLM 规划重
 ### Q24：你的检索分数阈值 0.15 是怎么定的？为什么不用 0.2？（高频追问）
 
 **A**：先澄清 0.15 在代码里的**真实定位**（它不是精确的相关度分界线）：
-1. **两处用途**：`answer_agent.SCORE_THRESHOLD = 0.15` 是"无匹配判定线"（最高分 < 0.15 直接说未检索到）；`filter_rerank_cases` 里的 `score >= 0.15` 是"粗滤线"（剔除明显无关）。分数是**加权重排后的 0-1 相关度**（故障词加权 0.4、设备惩罚后），不是 RRF 原始名次分。
+1. **两处用途**：`answer_agent.SCORE_THRESHOLD = 0.15` 是"无匹配判定线"（最高分 < 0.15 直接说未检索到）；`filter_rerank_cases` 里的 `score >= 0.15` 是"粗滤线"（剔除明显无关）。分数是**向量相似度**（bge-m3 余弦），不是 RRF 名次分、也不是 reranker 分——模型分存 `rerank_score` 独立字段，只排序不过滤，避免阈值语义混乱。
 
 **① 为什么是 0.15（可解释的经验值）**：
 
@@ -1477,6 +1532,10 @@ Judge 判不足时触发**自主重搜循环**（agentic loop）：LLM 规划重
 **④ 一句话总结（可背）**：
 
 > **"数字阈值解决'明显'，语义判断解决'争议'——0.15 负责把明显无关的挡在门外，验证 Agent 负责裁决剩下的能不能答。"**
+
+**⑤ 加分项（阈值工程化的回答）**：
+
+> 阈值全部收进配置（`RETRIEVAL_COARSE_THRESHOLD` 等），由 `scripts/calibrate_thresholds.py` 标定脚本按分数分布的分位数回填——阈值是"数据标定 + 上线调优"的工程参数，不是拍脑袋的魔法数（过程见 7.4）。
 
 ### Q25：你的 ReAct 检索 Agent 是怎么设计的？跟固定混合检索比优势在哪？
 
@@ -1601,24 +1660,24 @@ Judge 判不足时触发**自主重搜循环**（agentic loop）：LLM 规划重
 
 ### 9.1 技术深度亮点
 
-1. **(1) **混合检索 + RRF + 加权重排**：不是简单的向量检索，而是双库多路融合 + 业务加权，准确率显著高于单路
+1. **(1) **两级模型精排的混合检索**：双库多路召回 + RRF 融合 + bge-m3/Qwen3-Reranker 模型精排（规则重排降级兜底），准确率显著高于单路
 2. **(2) **查询清洗算法**：自研的中文 span 拆分 + 前后缀剥离 + 中间高置信词替换，专门解决中文干扰词问题
 3. **(3) **专家模式拆解并行**：FaultDecomposer 规则预检 + LLM 拆解复合故障 → 各单故障子查询并行 ReAct 检索（require_hybrid 首轮强制双路）→ 分组流式回答，从源头避免复合提问的语义稀释与串味
 4. **(4) **LangGraph 主图 + 子图**：智能问答主图意图路由（库存 > 聊天 > 故障）+ 3 个功能子图（CHAT/INVENTORY/FAULT），故障子图接验证 Agent，结构与钉钉 RobotGraph 同构
 5. **(5) **验证 Agent 三层把关**：Gate（客观零 LLM）+ Judge（语义裁决）+ 存在性核对（DB 查库），Judge 不足时 LLM 规划重搜策略自主重搜循环（max_iterations=2），把"回答不编造"从 Prompt 软约束升级为机制保障
-6. **(6) **本地 Embedding 部署**：Qwen3-Embedding-0.6B 本地推理，省 API 费用，数据不出企业
+6. **(6) **模型服务化与降级链路**：bge-m3 + Qwen3-Reranker 独立推理服务（OpenAI 兼容、可复用），服务不可用自动降级（召回→BM25-only / 精排→规则重排），恢复自动回弹——**降级不降可用性**
 7. **(7) **流式 SSE 五段式回答**：结构化输出 + 实时流式 + 案例来源严格保真
 8. **(8) **双路索引对称支撑**：向量路 Milvus `IVF_FLAT + COSINE`（nlist=1024/nprobe=16，见 4.1.8）+ BM25 路 PG `pg_trgm` GIN 索引（见 4.1.6）——两条检索路都有索引支撑，数据增长不拖累任何一路；配合 `score_threshold=0.0` 全量召回 + 后段融合精排的分层设计
 9. **(9) **错误码路由**：`extract_error_codes` 纯正则识别错误码（零 LLM）→ 决定 2 路/4 路切换 + 手册权威答案置顶（`manual_code_exact`）——用正则而非 LLM，零成本、可预测、无幻觉
 
 ### 9.2 工程实践亮点
 
-1. **(1) **公共检索编排层**：retrieval_flow.py 统一智能问答 / 专家 / 钉钉 / MCP 的检索逻辑（双库召回 + RRF + 过滤重排 + 错误码置顶），杜绝"检索逻辑写多遍"导致的策略漂移
+1. **(1) **公共检索编排层**：retrieval_flow.py 统一智能问答 / 专家 / 钉钉 / MCP 的检索逻辑（双库召回 + RRF + 过滤 + 模型精排 + 错误码置顶），杜绝"检索逻辑写多遍"导致的策略漂移；专家/追踪维修的检索收敛回公共层，消除复刻漂移
 2. **(2) **分级超时与降级**：拆解 20s / 单故障检索 60s / 多故障并行整体 90s，超时降级为"按单故障处理 / 空结果如实回答"，不挂死
 3. **(3) **错误码置顶修正**：RRF 名次融合对单路权威条目（manual_code_exact）不公平，融合后按 method 置顶，避免"SV0436 精确命中"排不过泛相似案例
 4. **(4) **SSE 事件协议统一**：专家模式与 /answer/stream 共用 thinking / references / answer / done 事件，参考案例带 fault 归属标签，前端零改动复用
 5. **(5) **多后端追踪（RAGFlow 默认）**：`TRACING_BACKEND=ragflow`，trace 持久化到 RAGFlow 数据集，不可达降级本地日志
-6. **(6) **Alembic 迁移健壮性**：`IF NOT EXISTS` + `ADD VALUE IF NOT EXISTS`，避免重复迁移报错
+6. **(6) **Alembic 迁移健壮性**：迁移用 try/except 逐个 `ALTER TYPE ... ADD VALUE` 吞掉重复错误（PG 不支持 IF NOT EXISTS），避免重复迁移报错
 
 ### 9.3 业务价值亮点
 
@@ -1653,7 +1712,7 @@ Judge 判不足时触发**自主重搜循环**（agentic loop）：LLM 规划重
 > 1. **(1) **评估体系不完整**：没有自动化的 RAG 评估指标（如 Ragas），目前靠人工抽样
 > 2. **(2) **专家模式拆解粒度粗**：按故障现象拆解（机械/液压/电气），但没做设备类型级别的路由（如"注塑机专家"只检索注塑机域、并行数量 4 上限）
 > 3. **(3) **知识库冷启动**：手册库已补错误码覆盖（精确 + 语义双路），但新设备手册缺失时 AI 仍无法回答，需要继续完善手册导入覆盖
-> 4. **(4) **验证 Agent 覆盖不匀**：完整验证（Gate + Judge + 重搜 + 存在性核对）目前只接智能问答；追踪模式是分级验证（轻量规则 Gate + 首轮/异常轮全量），专家/钉钉入口未接完整验证——这是"风险定价"的有意取舍，不是疏漏
+> 4. **(4) **验证 Agent 覆盖不匀**：完整验证（Gate + Judge + 重搜 + 存在性核对）目前只接智能问答；追踪维修未接验证 Agent（仅 score≥0.15 过滤 + 重排），专家/钉钉入口也未接完整验证——这是"风险定价"的有意取舍，也是可继续补强的方向
 >
 > 这些问题我都有方案，只是当前 demo 阶段没做。
 
@@ -1696,7 +1755,7 @@ Judge 判不足时触发**自主重搜循环**（agentic loop）：LLM 规划重
 | 工单理解 | `backend/app/agents/ticket_agent.py` |
 | 钉钉路由图 | `backend/app/agents/robot_graph.py` |
 | 智能问答 LangGraph 图 | `backend/app/agents/qa_graph.py`（主图 + 聊天/库存/故障子图） |
-| **公共检索编排层** | `backend/app/agents/retrieval_flow.py`（检索逻辑唯一实现） |
+| **公共检索编排层** | `backend/app/agents/retrieval_flow.py`（问答/专家/钉钉/验证 Agent 共用） |
 | **验证 Agent** | `backend/app/agents/verify_agent.py`（Gate + Judge + 重搜 + 存在性核对） |
 | **故障拆解器** | `backend/app/agents/fault_decomposer.py`（专家模式拆解，`_MAX_SUB_QUERIES=4`） |
 | 会话摘要 | `backend/app/agents/session_agent.py` |
@@ -1705,7 +1764,7 @@ Judge 判不足时触发**自主重搜循环**（agentic loop）：LLM 规划重
 | 手册错误码模型 | `backend/app/models/manual_code.py` |
 | **MCP Server** | `backend/app/mcp/server.py`（fastmcp，挂载 `/mcp`，`mcp_access_guard` 认证） |
 | **MCP 工具实现** | `backend/app/mcp/tools.py`（与钉钉机器人共用同一来源） |
-| Docker 编排 | `docker-compose.yml`（start_all.ps1 使用；`docker-compose.dev.yml` 额外带 Attu UI） |
+| Docker 编排 | `docker-compose.dev.yml`（基础设施编排，start_all.ps1 使用；根目录 `docker-compose.yml` 是 RAGFlow 的） |
 | 依赖清单 | `requirements.txt`（项目根目录，唯一权威版本） |
 | 一键启动 | `start_all.ps1`（项目根目录，端口冲突检查 + 全栈拉起） |
 | 手册错误码导入脚本 | `backend/scripts/import_manual_codes.py` |
@@ -1720,8 +1779,10 @@ Judge 判不足时触发**自主重搜循环**（agentic loop）：LLM 规划重
 调用方式（专家模式端点 `/answer/expert`，SSE 流式）：
 
 ```bash
+# 注意：/answer/expert 需要登录鉴权，先登录（/api/v1/auth/login）拿 token，再加 Authorization 头，否则返回 401
 curl -X POST http://127.0.0.1:18080/api/v1/search/answer/expert \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <你的token>" \
   -d '{"question": "3号注塑机出问题了，锁模力明显不够，做出来的产品全是飞边；液压油温一直65度报警降不下来；还有熔胶马达不转了，电机嗡嗡响。", "top_k": 5}'
 ```
 

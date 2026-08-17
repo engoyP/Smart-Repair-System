@@ -50,13 +50,19 @@ async def lifespan(app: FastAPI):
     logger.info(f"📊 数据库: {settings.DATABASE_URL.split('@')[1] if '@' in settings.DATABASE_URL else 'N/A'}")
     logger.info(f"🔴 Redis: {settings.REDIS_URL}")
     logger.info(f"🤖 DeepSeek API: {'已配置' if settings.DEEPSEEK_API_KEY else '未配置'}")
-    # 预热：预加载 Embedding 模型，避免首次搜索超时
+    # 预热：探测推理服务（bge-m3 编码 + reranker 重排）是否就绪，不阻塞启动
     try:
-        from app.core.embeddings import _load_model
-        _load_model()
-        logger.info("🧠 Embedding 模型预加载完成")
+        from app.core.embeddings import is_server_available
+        from app.core.config import settings as _s
+        if is_server_available():
+            logger.info(f"🧠 推理服务就绪: {_s.EMBEDDING_SERVER_URL}（{_s.EMBEDDING_MODEL_NAME} + {_s.RERANKER_MODEL_NAME}）")
+        else:
+            logger.warning(
+                f"⚠️ 推理服务不可用: {_s.EMBEDDING_SERVER_URL}。检索将降级为 BM25-only，"
+                "请尽快启动推理服务（start_all.ps1 / start_embedding_server.ps1）"
+            )
     except Exception as e:
-        logger.warning(f"⚠️ Embedding 模型预加载失败: {e}")
+        logger.warning(f"⚠️ 推理服务探测失败: {e}")
     # MCP Server 生命周期（StreamableHTTPSessionManager 任务组初始化）
     async with _mcp_app.lifespan(app):
         yield
@@ -73,7 +79,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )

@@ -157,7 +157,7 @@ class ExpertRepairAgent:
     def create_session(self, question: str, sub_queries: List[str],
                        faults: List[Dict], first_analysis: str) -> str:
         """首轮分析完成后创建会话，返回 session_id"""
-        sid = str(uuid.uuid4())[:8]
+        sid = str(uuid.uuid4())
         self._save_session(sid, {
             "initial_question": question,
             "sub_queries": sub_queries or [question],
@@ -363,31 +363,21 @@ class ExpertRepairAgent:
     # ============ 工具 ============
 
     def _search_knowledge(self, query: str) -> List[Dict]:
-        """轻量双路检索 top3（同追踪维修）：向量 + BM25 → RRF → 过滤 → 重排"""
+        """轻量双路检索（公共编排层）：向量 + BM25 → RRF → 粗筛 → 模型/规则精排 → 验证取 top3"""
         try:
-            from app.agents.tools import RetrievalTools, rrf_merge, weighted_rerank
-            from app.core.database import SessionLocal
-            from app.core.vector_store import vector_store
-            from app.core.embeddings import encode_text
-            tools = RetrievalTools(
-                db_session_factory=SessionLocal,
-                vector_store=vector_store,
-                embedding_fn=encode_text,
+            from app.agents.retrieval_flow import make_tools, retrieve_hybrid, filter_rerank_cases
+            tools = make_tools()
+            merged, error_codes, tools = retrieve_hybrid(query, top_k=10)
+            cases = filter_rerank_cases(
+                tools, merged, query, top_n=5, error_codes=error_codes,
             )
-            v = tools.vector_search(query, top_k=5, score_threshold=0.0)
-            b = tools.bm25_search(query, top_k=5)
-            result_sets = []
-            if v.success:
-                result_sets.append(v.data)
-            if b.success:
-                result_sets.append(b.data)
-            merged = rrf_merge(result_sets, top_n=5) if result_sets else []
-            merged = [m for m in merged if not m.get("rrf_only", False) and m.get("score", 0) >= 0.15]
-            cleaned = tools.query_extractor.extract(query, use_llm_fallback=False)
-            merged = weighted_rerank(merged, query, fault_weight=0.4, device_penalty=0.15,
-                                     cleaned_query=cleaned)
-            merged.sort(key=lambda x: x.get("score", 0), reverse=True)
-            return merged[:3]
+            try:
+                from app.agents.verify_agent import verify_agent
+                verified, _report = verify_agent.verify(query, cases)
+                return verified[:3]
+            except Exception as e:
+                logger.warning(f"[ExpertRepair] 验证降级，返回原检索结果: {e}")
+                return cases[:3]
         except Exception as e:
             logger.error(f"[ExpertRepair] 检索失败: {e}")
             return []

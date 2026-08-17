@@ -499,6 +499,7 @@ const switchMode = (mode) => {
   if (repairMode.value === mode) return
   repairMode.value = mode
   guidedSessionId.value = ''
+  if (currentSession.value) currentSession.value._expertSessionId = ''
   if (mode === 'guided') {
     startNewGuidedChat()
   } else if (mode === 'expert') {
@@ -621,6 +622,7 @@ const switchSession = async (s) => {
   s.unread = false
   repairMode.value = s.type || 'qa'
   guidedSessionId.value = ''
+  s._expertSessionId = ''
   await scrollToBottom()
 }
 
@@ -831,7 +833,7 @@ const handleSend = async () => {
 
     const response = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (localStorage.getItem('auth_token') || '') },
       body,
     })
 
@@ -911,6 +913,10 @@ const handleSend = async () => {
                 if (data.session_id) {
                   // 专家模式首轮：记录会话 ID，后续轮走 /answer/expert/step
                   session._expertSessionId = data.session_id
+                  // 如果本轮已解决（completed），清除会话 ID，下一次问题走新首轮
+                  if (data.completed) {
+                    session._expertSessionId = ''
+                  }
                 }
                 aiMsg.meta = {
                   confidence: data.confidence,

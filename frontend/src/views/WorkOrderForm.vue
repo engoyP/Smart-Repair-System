@@ -83,28 +83,48 @@
           </div>
         </div>
 
-        <!-- 错误码录入模式：手册 + 工单案例检索预填 -->
+        <!-- 错误码录入模式：粘贴日志原文 → 抠码 + 手册情形勾选 + 工单案例预填 -->
         <template v-if="entryMode === 'error_code'">
           <el-card shadow="never" class="section-card error-code-card">
             <template #header>
               <div class="card-header-row">
-                <span class="section-title">错误码检索预填</span>
-                <span class="mode-tip">输入设备运行日志/屏幕报警的错误码，匹配设备手册标准处理 + 历史工单案例，一键预填</span>
+                <span class="section-title">日志原文检索预填</span>
+                <span class="mode-tip">粘贴设备屏幕/日志原文，自动提取报警码并匹配手册标准处理与历史工单案例，一键预填</span>
               </div>
             </template>
             <div class="ec-search">
               <el-input
                 v-model="ecQuery"
-                placeholder="输入错误码，如 SV0436 / 6401（也可输入故障描述）"
-                clearable
+                type="textarea"
+                :rows="6"
+                placeholder="粘贴设备屏幕/日志原文，如：2026-08-14 10:32:15 SV0436 X AXIS: EXCESS CURRENT IN SERVO 启动瞬间电流突增报警，电机无法转动"
                 style="flex:1"
-                @keydown.enter="ecSearch"
               />
-              <el-button type="primary" :loading="ecSearching" @click="ecSearch">检索</el-button>
+              <el-button type="primary" :loading="ecSearching" @click="ecSearch">解析匹配</el-button>
             </div>
             <div v-if="ecError" class="ec-error">{{ ecError }}</div>
             <template v-if="ecResults">
               <div class="ec-results">
+                <!-- 抠码结果：可增删 tag，最终写入 device_error_code -->
+                <div class="ec-codes-row">
+                  <span class="ec-codes-label">识别报警码</span>
+                  <el-tag
+                    v-for="c in extractedCodes"
+                    :key="c"
+                    closable
+                    size="small"
+                    class="ec-code-tag"
+                    @close="removeExtractedCode(c)"
+                  >{{ c }}</el-tag>
+                  <el-input
+                    v-model="manualCodeInput"
+                    size="small"
+                    class="ec-code-input"
+                    placeholder="手动补码后回车"
+                    @keydown.enter="addManualCode"
+                  />
+                  <span v-if="!extractedCodes.length" class="ec-code-empty">未识别到报警码可手动补充</span>
+                </div>
                 <div v-if="!ecResults.manual_items.length && !ecResults.case_items.length" class="ec-empty">
                   未检索到相关手册或工单案例
                 </div>
@@ -114,19 +134,32 @@
                     <div class="ec-item-header">
                       <span class="ec-code">{{ m.error_code }}</span>
                       <span class="ec-title">{{ m.title }}</span>
+                      <el-tag v-if="m.severity" :type="sevTagType(m.severity)" size="small">{{ sevLabel(m.severity) }}（{{ m.effect || '-' }}）</el-tag>
                       <el-tag v-if="m.manual_name" size="small" type="info">{{ m.manual_name }}</el-tag>
                       <el-tag v-if="m.chapter" size="small" effect="plain">{{ m.chapter }}</el-tag>
                       <el-tag v-if="m.page" size="small" effect="plain">P{{ m.page }}</el-tag>
                     </div>
+                    <div v-if="m.message_text" class="ec-msg">{{ m.message_text }}</div>
                     <div v-if="m.description" class="ec-desc">{{ m.description }}</div>
-                    <div v-if="m.causes" class="ec-block">
-                      <span class="ec-block-label">可能原因</span>{{ m.causes }}
+                    <div v-if="m.related_codes?.length" class="ec-block">
+                      <span class="ec-block-label">伴随报警</span>
+                      <el-tag v-for="rc in m.related_codes" :key="rc" size="small" effect="plain" style="margin-right:4px">{{ rc }}</el-tag>
                     </div>
-                    <div v-if="m.solutions" class="ec-block">
-                      <span class="ec-block-label">标准处理</span>{{ m.solutions }}
+                    <div v-if="m.conditions?.length" class="ec-cond-list">
+                      <div class="ec-cond-head">勾选命中的情形（已按日志信号匹配度排序，可多选）</div>
+                      <el-checkbox-group v-model="m._selected" class="ec-cond-group">
+                        <el-checkbox v-for="(c, i) in m.conditions" :key="i" :value="i" class="ec-cond">
+                          <span class="ec-cond-signal">{{ c.signal }}</span>
+                          <span class="ec-cond-cause">{{ c.cause }}</span>
+                        </el-checkbox>
+                      </el-checkbox-group>
+                    </div>
+                    <div v-if="!m.conditions?.length && (m.causes || m.solutions)" class="ec-block">
+                      <span class="ec-block-label">可能原因</span>{{ m.causes }}
+                      <div v-if="m.solutions"><span class="ec-block-label">标准处理</span>{{ m.solutions }}</div>
                     </div>
                     <div class="ec-item-footer">
-                      <el-button size="small" type="primary" @click="applyManualItem(m)">选用此方案</el-button>
+                      <el-button size="small" type="primary" @click="applyManualItem(m)">选用选中情形</el-button>
                     </div>
                   </div>
                 </div>
@@ -259,41 +292,6 @@
               <el-form-item label="故障描述" required>
                 <el-input v-model="form.fault_description" type="textarea" :rows="3" placeholder="描述故障现象，如：电机启动后出现周期性金属摩擦异响" />
               </el-form-item>
-              <el-form-item label="故障现象">
-                <el-cascader
-                  v-model="faultPhenomenonCascader"
-                  :options="faultPhenomenaOptions"
-                  :props="{ value: 'value', label: 'label', children: 'children', checkStrictly: false }"
-                  placeholder="选择故障大类 → 具体现象（也可跳过，直接在下方手动输入）"
-                  style="width:100%"
-                  clearable
-                  filterable
-                  @change="onFaultPhenomenonChange"
-                />
-                <div class="cascader-hint">如故障类型不在列表中，可直接在下方文本框自由描述</div>
-              </el-form-item>
-              <el-form-item :label="faultPhenomenonCascader.length ? '补充描述' : '故障现象描述'" required>
-                <el-input
-                  v-model="form.fault_phenomenon"
-                  type="textarea"
-                  :rows="3"
-                  :placeholder="faultPhenomenonCascader.length ? '选填：对故障现象的补充说明' : '请详细描述故障现象，如：电机启动后出现周期性金属摩擦异响，振动值超标，外壳温度偏高等'"
-                />
-              </el-form-item>
-              <el-form-item label="现场附件">
-                <el-upload
-                  :http-request="uploadFile"
-                  :file-list="uploadFileList"
-                  list-type="picture-card"
-                  :on-remove="removeAttachment"
-                  :before-upload="beforeUpload"
-                  accept=".jpg,.jpeg,.png,.gif,.mp4,.mov,.avi,.webm"
-                  multiple
-                >
-                  <el-icon><Plus /></el-icon>
-                </el-upload>
-                <div class="upload-hint">支持 JPG/PNG/GIF/MP4，单文件 ≤ 50MB</div>
-              </el-form-item>
             </div>
 
             <div class="form-section">
@@ -301,27 +299,6 @@
                 诊断与维修
                 <el-button size="small" type="warning" style="float:right" @click="askAI('diagnosis')">AI 诊断建议</el-button>
               </div>
-              <el-form-item label="根本原因">
-                <el-cascader
-                  v-model="rootCauseCascader"
-                  :options="rootCauseOptions"
-                  :props="{ value: 'value', label: 'label', children: 'children', checkStrictly: false }"
-                  placeholder="选择原因大类 → 具体原因（也可跳过，直接在下方手动输入）"
-                  style="width:100%"
-                  clearable
-                  filterable
-                  @change="onRootCauseChange"
-                />
-                <div class="cascader-hint">如原因类型不在列表中，可直接在下方文本框自由描述</div>
-              </el-form-item>
-              <el-form-item :label="rootCauseCascader.length ? '补充说明' : '根本原因描述'" required>
-                <el-input
-                  v-model="form.root_cause"
-                  type="textarea"
-                  :rows="3"
-                  :placeholder="rootCauseCascader.length ? '选填：根本原因的补充说明' : '请描述根本原因，如：电机轴承磨损导致径向间隙增大，长期缺油运行加速老化'"
-                />
-              </el-form-item>
               <el-form-item label="处理步骤" required>
                 <div class="solution-area">
                   <el-input v-model="form.solution_steps" type="textarea" :rows="4" placeholder="1. 停机断电&#10;2. 拆除端盖检查轴承&#10;3. 更换同型号轴承并加注润滑脂" />
@@ -394,68 +371,139 @@
                 </div>
                 <div class="cascader-hint">如故障码不存在可点击「+ 新增」填写描述自动生成</div>
               </el-form-item>
-              <el-form-item label="设备错误码">
-                <el-input
-                  v-model="form.device_error_code"
-                  placeholder="设备运行日志/屏幕报警的错误码，如 SV0436、6401（多个用逗号分隔）"
-                />
-                <div class="cascader-hint">仅带错误码的机电设备填写，提交后自动沉淀到知识库，后续提问该错误码可被检索</div>
-              </el-form-item>
             </div>
 
+            <!-- 补充信息（可选）：次要字段折叠，关键路径 = 设备 + 日志粘贴 + 处理结果 -->
             <div class="form-section">
-              <div class="section-header">备件记录</div>
-              <div class="parts-list">
-                <div v-for="(part, idx) in usedParts" :key="idx" class="part-row">
-                  <el-select
-                    v-model="part.code"
-                    filterable
-                    :filter-method="(q) => filterSpareParts(q)"
-                    placeholder="选择备件 (输入编码或名称搜索)"
-                    style="width: 280px"
-                    @change="(val) => onPartSelected(val, idx)"
-                    @visible-change="(visible) => onSelectVisible(visible)"
-                    clearable
-                  >
-                    <el-option
-                      v-for="sp in sparePartOptions"
-                      :key="sp.part_code"
-                      :label="`${sp.part_code} - ${sp.part_name}`"
-                      :value="sp.part_code"
-                    >
-                      <div class="spare-option">
-                        <span class="spare-code">{{ sp.part_code }}</span>
-                        <span class="spare-name">{{ sp.part_name }}</span>
-                        <span v-if="sp.specification" class="spare-spec">{{ sp.specification }}</span>
+              <el-collapse v-model="supplementOpen" class="supplement-collapse">
+                <el-collapse-item :name="'supplement'">
+                  <template #title>
+                    <span class="supplement-title">
+                      补充信息（可选）
+                      <el-badge v-if="supplementFilledCount" :value="supplementFilledCount" type="info" class="supplement-badge" />
+                    </span>
+                  </template>
+                  <div class="supplement-body">
+                    <el-form-item label="故障现象">
+                      <el-cascader
+                        v-model="faultPhenomenonCascader"
+                        :options="faultPhenomenaOptions"
+                        :props="{ value: 'value', label: 'label', children: 'children', checkStrictly: false }"
+                        placeholder="选择故障大类 → 具体现象（也可跳过，直接在下方手动输入）"
+                        style="width:100%"
+                        clearable
+                        filterable
+                        @change="onFaultPhenomenonChange"
+                      />
+                      <div class="cascader-hint">如故障类型不在列表中，可直接在下方文本框自由描述</div>
+                    </el-form-item>
+                    <el-form-item :label="faultPhenomenonCascader.length ? '补充描述' : '故障现象描述'">
+                      <el-input
+                        v-model="form.fault_phenomenon"
+                        type="textarea"
+                        :rows="3"
+                        :placeholder="faultPhenomenonCascader.length ? '选填：对故障现象的补充说明' : '请详细描述故障现象，如：电机启动后出现周期性金属摩擦异响，振动值超标，外壳温度偏高等'"
+                      />
+                    </el-form-item>
+                    <el-form-item label="根本原因">
+                      <el-cascader
+                        v-model="rootCauseCascader"
+                        :options="rootCauseOptions"
+                        :props="{ value: 'value', label: 'label', children: 'children', checkStrictly: false }"
+                        placeholder="选择原因大类 → 具体原因（也可跳过，直接在下方手动输入）"
+                        style="width:100%"
+                        clearable
+                        filterable
+                        @change="onRootCauseChange"
+                      />
+                      <div class="cascader-hint">如原因类型不在列表中，可直接在下方文本框自由描述</div>
+                    </el-form-item>
+                    <el-form-item :label="rootCauseCascader.length ? '补充说明' : '根本原因描述'">
+                      <el-input
+                        v-model="form.root_cause"
+                        type="textarea"
+                        :rows="3"
+                        :placeholder="rootCauseCascader.length ? '选填：根本原因的补充说明' : '请描述根本原因，如：电机轴承磨损导致径向间隙增大，长期缺油运行加速老化'"
+                      />
+                    </el-form-item>
+                    <el-form-item label="设备错误码">
+                      <el-input
+                        v-model="form.device_error_code"
+                        placeholder="设备运行日志/屏幕报警的错误码，如 SV0436、6401（多个用逗号分隔）"
+                      />
+                      <div class="cascader-hint">仅带错误码的机电设备填写，提交后自动沉淀到知识库，后续提问该错误码可被检索</div>
+                    </el-form-item>
+                    <el-form-item label="现场附件">
+                      <el-upload
+                        :http-request="uploadFile"
+                        :file-list="uploadFileList"
+                        list-type="picture-card"
+                        :on-remove="removeAttachment"
+                        :before-upload="beforeUpload"
+                        accept=".jpg,.jpeg,.png,.gif,.mp4,.mov,.avi,.webm"
+                        multiple
+                      >
+                        <el-icon><Plus /></el-icon>
+                      </el-upload>
+                      <div class="upload-hint">支持 JPG/PNG/GIF/MP4，单文件 ≤ 50MB</div>
+                    </el-form-item>
+                    <div class="supplement-sub">
+                      <div class="section-header">备件记录</div>
+                      <div class="parts-list">
+                        <div v-for="(part, idx) in usedParts" :key="idx" class="part-row">
+                          <el-select
+                            v-model="part.code"
+                            filterable
+                            :filter-method="(q) => filterSpareParts(q)"
+                            placeholder="选择备件 (输入编码或名称搜索)"
+                            style="width: 280px"
+                            @change="(val) => onPartSelected(val, idx)"
+                            @visible-change="(visible) => onSelectVisible(visible)"
+                            clearable
+                          >
+                            <el-option
+                              v-for="sp in sparePartOptions"
+                              :key="sp.part_code"
+                              :label="`${sp.part_code} - ${sp.part_name}`"
+                              :value="sp.part_code"
+                            >
+                              <div class="spare-option">
+                                <span class="spare-code">{{ sp.part_code }}</span>
+                                <span class="spare-name">{{ sp.part_name }}</span>
+                                <span v-if="sp.specification" class="spare-spec">{{ sp.specification }}</span>
+                              </div>
+                              <div class="spare-option-info">
+                                <span class="spare-stock" :class="{ 'stock-low': sp.stock_quantity <= sp.safety_stock, 'stock-out': sp.stock_quantity <= 0 }">
+                                  库存: {{ sp.stock_quantity }}
+                                </span>
+                                <span v-if="sp.location" class="spare-location">库位: {{ sp.location }}</span>
+                              </div>
+                            </el-option>
+                          </el-select>
+                          <el-input-number
+                            v-model="part.qty"
+                            :min="1"
+                            :max="999"
+                            style="width: 100px"
+                            :class="{ 'qty-over-stock': part.stock !== undefined && part.qty > part.stock && part.stock >= 0 }"
+                          />
+                          <span v-if="part.stock !== undefined" class="part-stock-tip" :class="{ 'stock-warning': part.qty > part.stock && part.stock >= 0 }">
+                            可用: {{ part.stock }}
+                            <span v-if="part.qty > part.stock && part.stock >= 0" class="stock-short">（缺 {{ part.qty - part.stock }}）</span>
+                          </span>
+                          <div v-if="part.qty > part.stock && part.stock >= 0">
+                            <el-button type="warning" size="small" plain @click="handleUrgentOrder(part)">
+                              紧急采购
+                            </el-button>
+                          </div>
+                          <el-button type="danger" size="small" @click="usedParts.splice(idx,1)">删除</el-button>
+                        </div>
+                        <el-button type="primary" size="small" @click="usedParts.push({name:'',code:'',qty:1,stock:0,maxStock:999})">+ 添加备件</el-button>
                       </div>
-                      <div class="spare-option-info">
-                        <span class="spare-stock" :class="{ 'stock-low': sp.stock_quantity <= sp.safety_stock, 'stock-out': sp.stock_quantity <= 0 }">
-                          库存: {{ sp.stock_quantity }}
-                        </span>
-                        <span v-if="sp.location" class="spare-location">库位: {{ sp.location }}</span>
-                      </div>
-                    </el-option>
-                  </el-select>
-                  <el-input-number
-                    v-model="part.qty"
-                    :min="1"
-                    :max="999"
-                    style="width: 100px"
-                    :class="{ 'qty-over-stock': part.stock !== undefined && part.qty > part.stock && part.stock >= 0 }"
-                  />
-                  <span v-if="part.stock !== undefined" class="part-stock-tip" :class="{ 'stock-warning': part.qty > part.stock && part.stock >= 0 }">
-                    可用: {{ part.stock }}
-                    <span v-if="part.qty > part.stock && part.stock >= 0" class="stock-short">（缺 {{ part.qty - part.stock }}）</span>
-                  </span>
-                  <div v-if="part.qty > part.stock && part.stock >= 0">
-                    <el-button type="warning" size="small" plain @click="handleUrgentOrder(part)">
-                      紧急采购
-                    </el-button>
+                    </div>
                   </div>
-                  <el-button type="danger" size="small" @click="usedParts.splice(idx,1)">删除</el-button>
-                </div>
-                <el-button type="primary" size="small" @click="usedParts.push({name:'',code:'',qty:1,stock:0,maxStock:999})">+ 添加备件</el-button>
-              </div>
+                </el-collapse-item>
+              </el-collapse>
             </div>
           </el-form>
         </el-card>
@@ -645,6 +693,7 @@ const form = reactive({
   fault_phenomenon: '',
   fault_code: [],
   device_error_code: '',
+  log_text: '',
   root_cause_category: '',
   root_cause_type: '',
   root_cause: '',
@@ -676,14 +725,31 @@ const submitting = ref(false)
 const saving = ref(false)
 const analysisResult = ref(null)
 const entryMode = ref('standard')          // standard 标准录入 | error_code 错误码录入
-const ecQuery = ref('')                    // 错误码检索输入
+const ecQuery = ref('')                    // 日志原文输入
 const ecSearching = ref(false)
 const ecResults = ref(null)                // { manual_items, case_items, error_codes }
 const ecError = ref('')
-// 错误码录入模式：手册即权威方案，填了故障描述即可直接提交；标准模式仍需 AI 校验
+const extractedCodes = ref([])             // 抠出的报警码 tag 组（写入 device_error_code）
+const manualCodeInput = ref('')            // 手动补码输入
+const supplementOpen = ref([])             // 补充信息折叠区展开状态
+// 错误码录入模式：填了设备 + 故障描述即可提交；标准模式仍需 AI 校验
 const canSubmit = computed(() => entryMode.value === 'error_code'
-  ? !!form.fault_description
+  ? !!(form.device_id && form.fault_description)
   : !!analysisResult.value)
+
+const sevTagType = (s) => ({ EX: 'danger', OH: 'warning', INFO: 'info' }[s] || 'info')
+const sevLabel = (s) => ({ EX: 'EX 急停', OH: 'OH 停机', INFO: 'INFO 提示' }[s] || s)
+
+// 补充信息已填项数（折叠区标题徽标）
+const supplementFilledCount = computed(() => {
+  let n = 0
+  if (faultPhenomenonCascader.value.length || form.fault_phenomenon) n++
+  if (rootCauseCascader.value.length || form.root_cause) n++
+  if (form.device_error_code) n++
+  if (attachments.value.length) n++
+  if (usedParts.value.length) n++
+  return n
+})
 
 const isFormDirty = () => {
   return !!(form.device_id || form.device_error_code || form.fault_description ||
@@ -703,6 +769,7 @@ const resetFormFields = () => {
   form.fault_phenomenon = ''
   form.fault_code = []
   form.device_error_code = ''
+  form.log_text = ''
   form.root_cause_category = ''
   form.root_cause_type = ''
   form.root_cause = ''
@@ -730,6 +797,8 @@ const switchEntryMode = (mode) => {
     resetFormFields()
     ecResults.value = null
     ecQuery.value = ''
+    extractedCodes.value = []
+    manualCodeInput.value = ''
     entryMode.value = mode
   }
   if (isFormDirty()) {
@@ -741,23 +810,45 @@ const switchEntryMode = (mode) => {
   }
 }
 
-// 错误码检索：手册 + 工单案例
+// 日志原文检索：抠码 + 手册情形匹配 + 工单案例
 const ecSearch = async () => {
   const q = ecQuery.value.trim()
   if (!q) {
-    ElMessage.warning('请输入错误码或故障描述')
+    ElMessage.warning('请粘贴设备日志/屏幕原文')
     return
   }
   ecSearching.value = true
   ecError.value = ''
   try {
     const res = await request.post('/search/manual-lookup', { query: q, top_k: 5 })
+    // 情形勾选初始化：命中情形（signal 带 [命中] 标记）默认勾选
+    (res.manual_items || []).forEach(m => {
+      m._selected = (m.conditions || [])
+        .map((c, i) => (c.signal || '').includes('[命中]') ? i : -1)
+        .filter(i => i >= 0)
+    })
     ecResults.value = res
+    if (res.error_codes?.length) {
+      extractedCodes.value = res.error_codes
+      form.device_error_code = res.error_codes.join(',')
+    }
   } catch (e) {
     ecError.value = '检索失败，请稍后重试'
   } finally {
     ecSearching.value = false
   }
+}
+
+const syncExtractedCodes = () => { form.device_error_code = extractedCodes.value.join(',') }
+const removeExtractedCode = (c) => { extractedCodes.value = extractedCodes.value.filter(x => x !== c); syncExtractedCodes() }
+const addManualCode = () => {
+  const c = (manualCodeInput.value || '').trim().toUpperCase()
+  if (!c) return
+  if (!extractedCodes.value.includes(c)) {
+    extractedCodes.value.push(c)
+    syncExtractedCodes()
+  }
+  manualCodeInput.value = ''
 }
 
 // 错误码去重累计（逗号分隔）
@@ -769,14 +860,23 @@ const addDeviceErrorCode = (code) => {
   form.device_error_code = existing.join(',')
 }
 
-// 选用手册条目：一键预填工单（错误码 → device_error_code，标准处理 → 处理步骤）
+// 选用手册条目：勾选的情形 → 预填工单（日志原文落库留痕）
 const applyManualItem = (m) => {
   addDeviceErrorCode(m.error_code)
   if (m.device_type && !form.device_type) form.device_type = m.device_type
-  form.fault_description = m.title || m.description || form.fault_description
-  if (m.description && !form.fault_phenomenon) form.fault_phenomenon = m.description
-  if (m.causes) form.root_cause = m.causes
-  if (m.solutions) form.solution_steps = m.solutions
+  form.log_text = ecQuery.value.trim()
+  const selected = (m._selected || []).map(i => (m.conditions || [])[i]).filter(Boolean)
+  if (selected.length) {
+    form.fault_description = `${m.title}：${selected[0].cause || m.description || ''}`
+    if (m.message_text && !form.fault_phenomenon) form.fault_phenomenon = `日志原文：${m.message_text}`
+    form.root_cause = selected.map((c, i) => `${i + 1}）${c.cause}`).filter(Boolean).join('\n')
+    form.solution_steps = selected.map(c => c.steps).filter(Boolean).join('\n')
+  } else {
+    form.fault_description = m.title || m.description || form.fault_description
+    if (m.description && !form.fault_phenomenon) form.fault_phenomenon = m.description
+    if (m.causes) form.root_cause = m.causes
+    if (m.solutions) form.solution_steps = m.solutions
+  }
   ElMessage.success(`已选用手册方案：${m.error_code} ${m.title}`)
 }
 
@@ -1141,7 +1241,7 @@ const saveForm = async () => {
       'repair_result','follow_up_plan','work_hours',
       'used_parts','assignee_id',
       'location','status','tags','attachments',
-      'device_error_code',
+      'device_error_code','log_text',
     ]
     const data = { fault_description: form.fault_description || '' }
     for (const k of validFields) {
@@ -1574,7 +1674,8 @@ onMounted(async () => {
 .error-code-card { margin-bottom: 16px; }
 .error-code-card :deep(.el-card__header) { padding: 10px 16px; }
 .mode-tip { font-size: 12px; color: #86909C; }
-.ec-search { display: flex; gap: 8px; margin-bottom: 12px; }
+.ec-search { display: flex; gap: 8px; margin-bottom: 12px; align-items: flex-start; }
+.ec-search .el-button { margin-top: 2px; }
 .ec-error { color: #F53F3F; font-size: 13px; margin-bottom: 8px; }
 .ec-results { max-height: 480px; overflow-y: auto; }
 .ec-group { margin-bottom: 14px; }
@@ -1586,8 +1687,37 @@ onMounted(async () => {
 .ec-code { font-weight: 700; color: #E6A23C; font-size: 14px; }
 .ec-title { font-weight: 600; font-size: 14px; color: #1D2129; }
 .ec-desc { font-size: 13px; color: #4E5969; line-height: 1.6; margin-bottom: 6px; }
+.ec-msg {
+  font-family: Consolas, Monaco, monospace;
+  font-size: 12px;
+  color: #1D2129;
+  background: #F7F8FA;
+  border-left: 3px solid #C9CDD4;
+  border-radius: 4px;
+  padding: 6px 10px;
+  margin-bottom: 6px;
+  white-space: pre-wrap;
+}
 .ec-block { font-size: 13px; color: #4E5969; line-height: 1.7; margin-bottom: 4px; }
 .ec-block-label { font-weight: 600; color: #1D2129; margin-right: 6px; }
 .ec-item-footer { display: flex; justify-content: flex-end; margin-top: 6px; }
 .ec-empty { text-align: center; color: #C9CDD4; padding: 30px 0; font-size: 14px; }
+.ec-codes-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.ec-codes-label { font-size: 13px; font-weight: 600; color: #4E5969; }
+.ec-code-tag { font-family: Consolas, Monaco, monospace; font-weight: 700; }
+.ec-code-input { width: 170px; }
+.ec-code-empty { font-size: 12px; color: #86909C; }
+.ec-cond-list { margin: 6px 0; }
+.ec-cond-head { font-size: 12px; color: #86909C; margin-bottom: 6px; }
+.ec-cond-group { display: flex; flex-direction: column; gap: 4px; }
+.ec-cond { height: auto; align-items: flex-start; white-space: normal; margin-right: 0; }
+.ec-cond :deep(.el-checkbox__label) { white-space: normal; line-height: 1.5; }
+.ec-cond-signal { font-weight: 600; color: #FF7D00; font-size: 13px; }
+.ec-cond-cause { color: #4E5969; font-size: 12px; margin-left: 6px; }
+/* 补充信息折叠区 */
+.supplement-collapse { border: none; }
+.supplement-collapse :deep(.el-collapse-item__header) { background: #F7F8FA; border-radius: 6px; padding: 0 14px; font-size: 14px; font-weight: 600; }
+.supplement-collapse :deep(.el-collapse-item__content) { padding: 14px 4px 0; }
+.supplement-badge { margin-left: 8px; }
+.supplement-body { padding-left: 4px; }
 </style>

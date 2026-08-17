@@ -10,6 +10,8 @@ from sqlalchemy.orm import Session
 from loguru import logger
 
 from app.core.database import get_db
+from app.core.config import settings
+from app.core.security import get_current_user
 from app.agents.tools import RetrievalTools, rrf_merge
 from app.agents.retrieval_flow import (
     make_tools as _make_tools,
@@ -21,6 +23,7 @@ from app.agents.answer_agent import answer_agent
 from app.agents.fault_decomposer import fault_decomposer
 from app.agents.guided_repair_agent import guided_repair_agent
 from app.agents.expert_repair_agent import expert_repair_agent, ExpertOption, ExpertStepResult
+from app.agents.verify_agent import verify_agent
 
 router = APIRouter()
 
@@ -80,8 +83,8 @@ class ExpertStepRequest(BaseModel):
 
 
 class ManualLookupRequest(BaseModel):
-    """工单错误码录入预填请求：输入设备错误码或故障描述，返回手册标准处理 + 工单案例"""
-    query: str = Field(..., min_length=1, max_length=200, description="错误码（如 SV0436 / 6401）或故障描述")
+    """工单错误码录入预填请求：粘贴设备日志/屏幕原文或错误码，返回手册标准处理 + 工单案例"""
+    query: str = Field(..., min_length=1, max_length=2000, description="设备日志/屏幕原文（或错误码，如 SV0436 / 6401）")
     top_k: Optional[int] = Field(5, ge=1, le=10, description="每类返回条数上限")
 
 
@@ -105,7 +108,7 @@ def quick_search(
             top_k=top_k,
             device_type=device_type,
             fault_code=fault_code,
-            score_threshold=0.3,
+            score_threshold=settings.RETRIEVAL_VECTOR_THRESHOLD,
         )
         results = []
         for item in result.data:
@@ -139,7 +142,7 @@ def hybrid_search(
         top_k=request.top_k,                           
         device_type=request.device_type, 
         fault_code=request.fault_code,
-        score_threshold=0.15
+        score_threshold=settings.RETRIEVAL_COARSE_THRESHOLD
         )
     bm25_result = tools.bm25_search(
         query=request.query, 
@@ -252,13 +255,20 @@ def manual_lookup(
     request: ManualLookupRequest,
     db: Session = Depends(get_db),
 ):
-    """工单"错误码录入"模式预填接口：输入设备错误码/故障描述，
-    返回手册标准处理（权威，带章节/页码出处）+ 相关工单案例（真实处理记录），供前端一键预填工单。"""
-    from app.agents.tools import extract_error_codes, rrf_merge
+    """工单"错误码录入"模式预填接口：粘贴设备日志/屏幕原文（或错误码/故障描述），
+    返回手册标准处理（权威，带章节/页码出处 + 情形清单）+ 相关工单案例（真实处理记录），
+    供前端一键预填工单。"""
+    from app.agents.tools import extract_error_codes, rrf_merge, clean_query_for_retrieval
+    from app.agents.retrieval_flow import rank_manual_conditions
 
     tools = _make_tools()
     error_codes = extract_error_codes(request.query)
     top_k = request.top_k
+
+    # 日志原文清洗：向量路查询文本剔除时间戳/干扰词，防长日志语义漂移；清洗为空则截断回退
+    vector_query = clean_query_for_retrieval(request.query).strip()
+    if not vector_query:
+        vector_query = request.query[:300]
 
     # 1. 手册路：错误码精确匹配优先，语义检索补充
     manual_items = []
@@ -266,7 +276,7 @@ def manual_lookup(
         exact = tools.manual_code_search(error_codes, top_k=top_k)
         if exact.success and exact.data:
             manual_items.extend(exact.data)
-        vec = tools.manual_vector_search(request.query, top_k=top_k)
+        vec = tools.manual_vector_search(vector_query, top_k=top_k)
         if vec.success and vec.data:
             seen = {m.get("manual_code_id") for m in manual_items}
             for r in vec.data:
@@ -274,7 +284,7 @@ def manual_lookup(
                     seen.add(r.get("manual_code_id"))
                     manual_items.append(r)
     else:
-        vec = tools.manual_vector_search(request.query, top_k=top_k)
+        vec = tools.manual_vector_search(vector_query, top_k=top_k)
         if vec.success and vec.data:
             manual_items.extend(vec.data)
 
@@ -282,7 +292,7 @@ def manual_lookup(
     case_items = []
     try:
         bm25 = tools.bm25_search(query=request.query, top_k=top_k)
-        vector = tools.vector_search(query=request.query, top_k=top_k, score_threshold=0.0)
+        vector = tools.vector_search(query=vector_query, top_k=top_k, score_threshold=0.0)
         result_sets = [r.data for r in (bm25, vector) if r.success and r.data]
         merged = rrf_merge(result_sets, top_n=top_k) if result_sets else []
         for m in merged:
@@ -296,7 +306,8 @@ def manual_lookup(
     except Exception as e:
         logger.error(f"manual-lookup 知识库案例检索失败: {e}")
 
-    # 3. 手册条目转输出（带出处字段）
+    # 3. 手册条目情形排序（伴随信号匹配）+ 转输出（带结构化字段）
+    manual_items = rank_manual_conditions(manual_items, request.query)
     out_manual = []
     for m in manual_items:
         out_manual.append({
@@ -304,6 +315,12 @@ def manual_lookup(
             "error_code": m.get("error_code", ""),
             "title": m.get("title", ""),
             "description": m.get("description", "") or "",
+            "message_text": m.get("message_text", "") or "",
+            "severity": m.get("severity", "") or "",
+            "effect": m.get("effect", "") or "",
+            "conditions": m.get("conditions", []) or [],
+            "related_codes": m.get("related_codes", []) or [],
+            "matched_signals": m.get("matched_signals", []) or [],
             "causes": m.get("causes", "") or "",
             "solutions": m.get("solutions", "") or "",
             "manual_name": m.get("manual_name", ""),
@@ -324,6 +341,7 @@ def manual_lookup(
 async def analyze_answer_stream(
     request: AnswerRequest,
     db: Session = Depends(get_db),
+    current_user = Depends(get_current_user),
 ):
     """
     流式分析型问答：先检索历史案例，再基于案例流式生成分析回答（SSE）。
@@ -394,6 +412,7 @@ async def analyze_answer_stream(
 async def expert_answer_stream(
     request: AnswerRequest,
     db: Session = Depends(get_db),
+    current_user = Depends(get_current_user),
 ):
     """
     专家模式：复合故障问题支持拆解 + 分组并行检索 + 分组回答。
@@ -460,6 +479,13 @@ async def expert_answer_stream(
                 device, kws = _extract_device_and_fault(tools, sq)
                 cases = _filter_rerank_cases(tools, res, sq,
                                              require_device=device, require_keywords=tuple(kws))
+                # 验证 Agent：存在性核对 + 语义可答性（LLM 校验放线程，避免阻塞事件循环）
+                try:
+                    verified, _report = await asyncio.to_thread(
+                        verify_agent.verify, sq, cases, device)
+                    cases = verified or cases
+                except Exception as e:
+                    logger.warning(f"[Expert] 验证降级: {e}")
                 faults.append({"name": sq, "cases": cases})
                 for ref in cases:
                     references.append(_to_reference(ref, fault=sq))
@@ -506,6 +532,13 @@ async def expert_answer_stream(
         device, kws = _extract_device_and_fault(tools, sub_queries[0])
         filtered_merged = _filter_rerank_cases(tools, merged, request.question,
                                                require_device=device, require_keywords=tuple(kws))
+        # 验证 Agent：存在性核对 + 语义可答性（LLM 校验放线程，避免阻塞事件循环）
+        try:
+            verified, _report = await asyncio.to_thread(
+                verify_agent.verify, request.question, filtered_merged, device)
+            filtered_merged = verified or filtered_merged
+        except Exception as e:
+            logger.warning(f"[Expert] 验证降级: {e}")
         references = [_to_reference(ref) for ref in filtered_merged[:8]]
         faults_single = [{"name": sub_queries[0], "cases": filtered_merged}]
 
@@ -531,7 +564,8 @@ async def expert_answer_stream(
 
 
 @router.post("/answer/expert/step", summary="专家模式下一步（多轮引导：分析+引导）")
-async def expert_next_step(request: ExpertStepRequest):
+async def expert_next_step(request: ExpertStepRequest,
+                          current_user = Depends(get_current_user)):
     """专家模式后续引导轮：用户反馈执行结果 → AI 判断是否解决，给出下一步 2-3 个方向
 
     SSE 事件（与首轮 /answer/expert 一致）：
@@ -643,7 +677,8 @@ class GuidedRepairStepOut(BaseModel):
 
 
 @router.post("/guided-repair/start", response_model=GuidedRepairStepOut, summary="开始追踪维修")
-def start_guided_repair(request: GuidedRepairStartRequest):
+def start_guided_repair(request: GuidedRepairStartRequest,
+                      current_user = Depends(get_current_user)):
     """根据故障描述启动追踪维修诊断"""
     result = guided_repair_agent.start_diagnosis(
         description=request.description,
@@ -661,7 +696,8 @@ def start_guided_repair(request: GuidedRepairStartRequest):
 
 
 @router.post("/guided-repair/{session_id}/step", response_model=GuidedRepairStepOut, summary="追踪维修下一步")
-def guided_repair_next_step(session_id: str, request: GuidedRepairStepRequest):
+def guided_repair_next_step(session_id: str, request: GuidedRepairStepRequest,
+                           current_user = Depends(get_current_user)):
     """维修员反馈操作结果，AI 给出下一步诊断"""
     result = guided_repair_agent.next_step(
         session_id=session_id,
@@ -689,7 +725,8 @@ class GuidedRepairChatRequest(BaseModel):
 
 
 @router.post("/guided-repair/chat", summary="对话式追踪维修（流式 SSE）")
-async def guided_repair_chat_stream(request: GuidedRepairChatRequest):
+async def guided_repair_chat_stream(request: GuidedRepairChatRequest,
+                                    current_user = Depends(get_current_user)):
     """对话式追踪维修：维修员发自然语言消息，AI 流式返回引导回复。
 
     事件类型：
@@ -701,7 +738,7 @@ async def guided_repair_chat_stream(request: GuidedRepairChatRequest):
     import uuid
     import asyncio
 
-    sid = request.session_id or str(uuid.uuid4())[:8]
+    sid = request.session_id or str(uuid.uuid4())
 
     async def stream():
         yield f"data: {json_module.dumps({'type': 'thinking'}, ensure_ascii=False)}\n\n"

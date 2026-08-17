@@ -4,6 +4,7 @@ from typing import Optional
 from loguru import logger
 
 from app.core.database import get_db
+from app.core.config import settings
 from app.core.security import get_current_user
 from app.models.knowledge import KnowledgeItem, KnowledgeStatus
 from app.models.user import User
@@ -49,6 +50,34 @@ def list_knowledge_items(
     return {"total": total, "items": [_k_to_dict(k) for k in items], "page": page, "page_size": page_size}
 
 
+# ==================== 语义检索 ====================
+# 注意：/search 必须注册在 /{knowledge_id} 之前，否则 "search" 会被当作路径参数捕获（422）
+
+
+@router.get("/search", summary="语义检索知识条目")
+def search_knowledge(
+    query: str = Query(..., description="检索关键词"),
+    device_type: Optional[str] = None,
+    fault_code: Optional[str] = None,
+    limit: int = 5,
+    db: Session = Depends(get_db)
+):
+    try:
+        from app.core.vector_store import vector_store
+        from app.core.embeddings import encode_text
+        query_vec = encode_text(query)
+        results = vector_store.search(
+            query_vector=query_vec,
+            limit=limit,
+            device_type=device_type,
+            fault_code=fault_code,
+            score_threshold=settings.RETRIEVAL_VECTOR_THRESHOLD,
+        )
+        return {"query": query, "device_type": device_type, "fault_code": fault_code, "results": results}
+    except Exception as e:
+        return {"query": query, "results": [], "error": str(e)}
+
+
 @router.get("/{knowledge_id}", response_model=KnowledgeResponse, summary="获取知识条目详情")
 def get_knowledge_item(knowledge_id: int, db: Session = Depends(get_db)):
     item = db.query(KnowledgeItem).filter(KnowledgeItem.id == knowledge_id).first()
@@ -76,32 +105,6 @@ def update_knowledge_item(knowledge_id: int, data: KnowledgeUpdate, db: Session 
 def delete_knowledge_item(knowledge_id: int, db: Session = Depends(get_db)):
     """知识库为只读，禁止删除已收录的知识条目"""
     raise HTTPException(status_code=403, detail="知识库为只读，禁止删除知识条目")
-
-
-# ==================== 语义检索 ====================
-
-@router.get("/search", summary="语义检索知识条目")
-def search_knowledge(
-    query: str = Query(..., description="检索关键词"),
-    device_type: Optional[str] = None,
-    fault_code: Optional[str] = None,
-    limit: int = 5,
-    db: Session = Depends(get_db)
-):
-    try:
-        from app.core.vector_store import vector_store
-        from app.core.embeddings import encode_text
-        query_vec = encode_text(query)
-        results = vector_store.search(
-            query_vector=query_vec,
-            limit=limit,
-            device_type=device_type,
-            fault_code=fault_code,
-            score_threshold=0.3,
-        )
-        return {"query": query, "device_type": device_type, "fault_code": fault_code, "results": results}
-    except Exception as e:
-        return {"query": query, "results": [], "error": str(e)}
 
 
 # ==================== 从工单提取知识 ====================
@@ -359,15 +362,15 @@ def _check_duplicate(extracted, db: Session, exclude_id: Optional[int] = None) -
             from app.core.embeddings import encode_text
             from app.core.vector_store import vector_store
 
-            # 构建查询文本：用内容前200字也加入查询，增强语义匹配
-            content_snippet = (extracted.content or "")[:200]
+            # 构建查询文本：用内容前 MAX_VECTOR_CONTENT_LEN 字也加入查询，增强语义匹配
+            content_snippet = (extracted.content or "")[:settings.MAX_VECTOR_CONTENT_LEN]
             query_text = f"{extracted.device_type or ''} {extracted.title} {extracted.fault_code or ''} {' '.join(extracted.keywords[:3])} {content_snippet}"
             query_vec = encode_text(query_text)
             results = vector_store.search(
                 query_vector=query_vec,
                 limit=8,
                 device_type=extracted.device_type if extracted.device_type else None,
-                score_threshold=0.45,
+                score_threshold=settings.DEDUP_CANDIDATE_THRESHOLD,
             )
 
             for r in results:
@@ -380,7 +383,7 @@ def _check_duplicate(extracted, db: Session, exclude_id: Optional[int] = None) -
 
                 is_true_dup = False
                 dedup_reason = ""
-                if title_sim >= 0.55 and extracted.content:
+                if title_sim >= settings.DEDUP_LLM_THRESHOLD and extracted.content:
                     existing_content = r.get("content", "") or ""
                     if existing_content:
                         from app.agents.dedup_agent import dedup_agent
@@ -520,7 +523,7 @@ def _sync_to_milvus(item: KnowledgeItem, db: Session):
     from app.core.embeddings import encode_text
     from app.core.vector_store import vector_store
 
-    text = f"{item.title} {item.content[:2000]}"
+    text = f"{item.title} {item.content[:settings.MAX_VECTOR_CONTENT_LEN]}"
     vec = encode_text(text)
 
     if item.milvus_id:

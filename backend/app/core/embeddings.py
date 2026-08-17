@@ -1,114 +1,77 @@
-"""Embedding 编码服务 - 使用 Qwen3-Embedding-0.6B 模型做向量编码
+"""Embedding 客户端 - HTTP 调用统一推理服务（bge-m3 编码）
 
-Qwen3-Embedding-0.6B 是阿里通义千问官方出品的文本嵌入模型，
-基于 Qwen3-0.6B 通过多阶段训练微调而来，输出 1024 维向量。
-Embedding 取法：取模型最后一层 EOS token 的隐藏状态 + L2 归一化。
+模型推理已抽到独立服务（app.core.embedding_server，端口 8010），
+本模块是主链路（FastAPI 进程 + 数据脚本）的 HTTP 客户端：
+- 保持同名 API（encode_text / encode_texts / get_vector_dimension），调用点零改动
+- 服务不可用时：encode_* 抛 RuntimeError（调用方决定降级），is_server_available() 供快速探测
+
+依赖推理服务已启动（start_all.ps1 / start_embedding_server.ps1 负责启动并等待就绪）。
 """
-import os
-from typing import List
+from typing import List, Optional
+
+import httpx
 from loguru import logger
 
-_model = None
-_tokenizer = None
-_device = None
-_VECTOR_DIM = None
+from app.core.config import settings
 
-# 本地模型路径（优先加载）
-_MODEL_LOCAL_PATH = r"D:\models\Qwen\Qwen3-Embedding-0___6B\models\qwen--Qwen3-Embedding-0.6B\snapshots\master"
-
-# 若本地不存在，则从 HuggingFace Mirror 下载
-_MODEL_HF_NAME = "Qwen/Qwen3-Embedding-0.6B"
+_SERVER_URL = settings.EMBEDDING_SERVER_URL.rstrip("/")
+_TIMEOUT = 30.0          # 单次编码请求超时（CPU 批量编码可能较慢）
+_RETRIES = 2             # 失败重试次数
+_HTTP = httpx.Client(timeout=_TIMEOUT)
 
 
-def _load_model():
-    """懒加载 Qwen3-Embedding 模型"""
-    global _model, _tokenizer, _device, _VECTOR_DIM
-    if _model is not None:
-        return
+def is_server_available() -> bool:
+    """快速探测推理服务是否可用（短超时，用于降级判断）"""
+    try:
+        r = _HTTP.get(f"{_SERVER_URL}/health", timeout=2.0)
+        return r.status_code == 200
+    except Exception:
+        return False
 
-    import torch
-    from transformers import AutoModel, AutoTokenizer
 
-    _device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    # 优先本地路径
-    paths = []
-    if os.path.isdir(_MODEL_LOCAL_PATH):
-        paths.append(("本地路径", _MODEL_LOCAL_PATH))
-
-    # 回退在线下载（使用国内镜像）
-    os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
-    paths.append(("HuggingFace", _MODEL_HF_NAME))
-
-    loaded = False
-    for source, model_path in paths:
+def _call_embeddings(texts: List[str], max_length: int) -> List[List[float]]:
+    """调用 /v1/embeddings，带重试；失败抛 RuntimeError"""
+    last_err: Optional[Exception] = None
+    for attempt in range(_RETRIES + 1):
         try:
-            logger.info(f"加载 Qwen3-Embedding 模型 (source={source}): {model_path} (device={_device})")
-            _tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-            _model = AutoModel.from_pretrained(
-                model_path,
-                trust_remote_code=True,
-                torch_dtype=torch.bfloat16 if _device == "cuda" else torch.float32,
+            r = _HTTP.post(
+                f"{_SERVER_URL}/v1/embeddings",
+                json={"model": settings.EMBEDDING_MODEL_NAME, "input": texts,
+                      "max_length": max_length},
+                timeout=_TIMEOUT,
             )
-            _model.to(_device)
-            _model.eval()
-            _VECTOR_DIM = _model.config.hidden_size
-            logger.info(f"Qwen3-Embedding 模型加载完成 (source={source}), 维度={_VECTOR_DIM}")
-            loaded = True
-            break
+            r.raise_for_status()
+            data = r.json()["data"]
+            data.sort(key=lambda x: x["index"])
+            return [d["embedding"] for d in data]
         except Exception as e:
-            logger.warning(f"从 {source} 加载模型失败: {e}")
-            _model = None
-            _tokenizer = None
-            continue
-
-    if not loaded:
-        raise RuntimeError("Qwen3-Embedding 模型加载失败")
+            last_err = e
+            if attempt < _RETRIES:
+                logger.warning(f"Embedding 服务调用失败（第 {attempt+1} 次），重试: {e}")
+    raise RuntimeError(
+        f"Embedding 服务不可用（{_SERVER_URL}）: {last_err}。请先启动推理服务："
+        "start_all.ps1 或 python -m app.core.embedding_server"
+    )
 
 
 def get_vector_dimension() -> int:
-    """获取向量维度"""
-    _load_model()
-    return _VECTOR_DIM
+    """获取向量维度（从推理服务健康检查读取，失败回退配置值）"""
+    try:
+        r = _HTTP.get(f"{_SERVER_URL}/health", timeout=2.0)
+        r.raise_for_status()
+        dim = r.json().get("dim")
+        if dim:
+            return int(dim)
+    except Exception:
+        pass
+    return settings.MILVUS_VECTOR_SIZE
 
 
 def encode_text(text: str, max_length: int = 512) -> List[float]:
-    """将文本编码为 1024 维向量
-
-    Qwen3-Embedding 取法：
-    1. tokenize 文本，末尾是 EOS token (<|endoftext|>)
-    2. 取最后一层 EOS token 位置的 hidden state
-    3. L2 归一化
-    """
-    import torch
-    _load_model()
-
-    inputs = _tokenizer(
-        text,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=max_length,
-        add_special_tokens=True,
-    )
-    inputs = {k: v.to(_device) for k, v in inputs.items()}
-
-    with torch.no_grad():
-        outputs = _model(**inputs)
-
-    # 取 EOS token 位置的 hidden state
-    last_hidden = outputs.last_hidden_state  # [1, seq_len, 1024]
-    seq_lengths = inputs["attention_mask"].sum(dim=1) - 1  # EOS 位置
-    batch_indices = torch.arange(last_hidden.size(0), device=_device)
-    eos_embeddings = last_hidden[batch_indices, seq_lengths]  # [1, 1024]
-
-    # L2 归一化
-    eos_embeddings = torch.nn.functional.normalize(eos_embeddings, p=2, dim=1)
-
-    return eos_embeddings[0].cpu().tolist()
+    """将文本编码为 1024 维向量（bge-m3 dense，已 L2 归一化）"""
+    return _call_embeddings([text], max_length)[0]
 
 
 def encode_texts(texts: List[str], max_length: int = 512) -> List[List[float]]:
-    """批量编码"""
-    _load_model()
-    return [encode_text(t, max_length=max_length) for t in texts]
+    """批量编码（一次 HTTP 请求，比逐个调用高效）"""
+    return _call_embeddings(texts, max_length)
