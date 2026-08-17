@@ -325,8 +325,7 @@ MCP 访问控制：配置 `MCP_API_KEY` 后要求 `Authorization: Bearer <key>`�
 
 `backend/scripts/` 包含：
 
-- `seed_knowledge.py` / `seed_knowledge_25.py`：知识种子数据
-- `seed_knowledge_to_50.py`：知识库补齐到 50 条的规范案例
+- `seed_knowledge.py`：知识种子数据（200 条）
 - `seed_categories.py` / `seed_fault_codes.py` / `seed_data.py`：分类、故障码、基础数据
 - `import_manual_codes.py`：手册错误码 JSON 导入
 - `sync_vectors.py`：知识条目同步到 Milvus

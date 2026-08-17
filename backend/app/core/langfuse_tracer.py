@@ -82,7 +82,7 @@ class RAGFlowClient:
                         "name": self.traces_dataset,
                         "description": "LLM 调用追踪数据（自动生成）",
                         "chunk_method": "naive",
-                        "embedding_model": "Qwen3-Embedding-0.6B@OpenAI-API-Compatible",
+                        "embedding_model": "BAAI/bge-m3@OpenAI-API-Compatible",
                         "permission": "me",
                     },
                     timeout=10,

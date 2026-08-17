@@ -12,8 +12,7 @@ causes/solutions 为 deprecated 过渡列，不再写入。
     cd backend
     python scripts/import_manual_codes.py                          # 种子数据增量导入（同码 upsert）
     python scripts/import_manual_codes.py --json-file manual_codes.json   # 从 JSON 文件导入
-    python scripts/import_manual_codes.py --force-rebuild          # 清空重灌（换模型迁移用）
-    python scripts/import_manual_codes.py --force-rebuild --target-collection log_code_bgem3
+    python scripts/import_manual_codes.py --force-rebuild          # 清空重灌（PG 表 + Milvus 集合）
     python scripts/import_manual_codes.py --resync                 # 按 PG 重灌全部向量（修复 Milvus 不一致）
 
 前提条件:
@@ -361,22 +360,19 @@ def _write_entry(db, store, item: dict, existing: Optional[ManualCodeEntry] = No
 
 def import_manual_codes(
     force_rebuild: bool = False,
-    target_collection: str = "",
     json_file: str = "",
     resync: bool = False,
 ):
     """主导入函数
 
     Args:
-        force_rebuild: 清空 manual_code_entries 表 + 目标 Milvus 集合后重灌（换模型迁移用）
-        target_collection: 目标 Milvus 集合名（默认 settings.MILVUS_LOG_CODE_COLLECTION）
+        force_rebuild: 清空 manual_code_entries 表 + Milvus 集合后重灌
         json_file: JSON 文件路径（数组格式，字段见 manual_codes.example.json）；缺省用种子数据
         resync: 只按 PG 重灌全部向量（PG 不动，修复 Milvus 不一致，如 PUT 中途失败）
     """
     check_inference_server()
-    store = (LogCodeVectorStore(collection_name=target_collection)
-             if target_collection else log_code_store)
-    store_name = target_collection or settings.MILVUS_LOG_CODE_COLLECTION
+    store = log_code_store
+    store_name = settings.MILVUS_LOG_CODE_COLLECTION
 
     # 数据源：--json-file 优先，否则种子数据
     if json_file:
@@ -493,9 +489,7 @@ def import_manual_codes(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="设备手册错误码导入（PostgreSQL + Milvus log_code 集合）")
     parser.add_argument("--force-rebuild", action="store_true",
-                        help="清空 manual_code_entries 表与目标集合后重灌（换模型迁移用）")
-    parser.add_argument("--target-collection", default="",
-                        help="目标 Milvus 集合名（默认 settings.MILVUS_LOG_CODE_COLLECTION；无损迁移时指定新集合）")
+                        help="清空 manual_code_entries 表与 Milvus 集合后重灌")
     parser.add_argument("--json-file", default="",
                         help="JSON 文件路径（数组格式，字段见 scripts/manual_codes.example.json）；缺省用种子数据")
     parser.add_argument("--resync", action="store_true",
@@ -503,7 +497,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
     import_manual_codes(
         force_rebuild=args.force_rebuild,
-        target_collection=args.target_collection,
         json_file=args.json_file,
         resync=args.resync,
     )
