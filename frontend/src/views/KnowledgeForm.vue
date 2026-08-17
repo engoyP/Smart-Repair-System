@@ -45,15 +45,12 @@
             <el-option label="已归档" value="ARCHIVED" />
           </el-select>
         </el-form-item>
-        <el-form-item v-if="isNew">
-          <el-button type="primary" @click="handleSave" :loading="saving">保存</el-button>
-          <el-button @click="$router.back()">返回</el-button>
-        </el-form-item>
-        <el-form-item v-else>
-          <!-- 知识库只读，编辑态不提供保存 -->
-          <el-button @click="$router.back()">返回</el-button>
-        </el-form-item>
       </el-form>
+      <!-- 操作按钮放在表单外：el-form 的 disabled（只读态）会级联禁用内部按钮 -->
+      <div class="form-actions">
+        <el-button v-if="isNew" type="primary" @click="handleSave" :loading="saving">保存</el-button>
+        <el-button @click="goBack">返回</el-button>
+      </div>
     </el-card>
   </div>
 </template>
@@ -126,6 +123,15 @@ const handleSave = async () => {
   } finally { saving.value = false }
 }
 
+const goBack = () => {
+  // 有历史记录则返回上一页，否则兜底回知识列表（避免直接访问详情页时 back 无效）
+  if (window.history.state.back) {
+    router.back()
+  } else {
+    router.push('/knowledge/list')
+  }
+}
+
 onMounted(async () => {
   await loadCategories()
   try {
@@ -139,4 +145,5 @@ onMounted(async () => {
 <style scoped>
 .page-header { margin-bottom: 16px; }
 .page-title { font-size: 20px; font-weight: 600; color: var(--color-text-primary); }
+.form-actions { max-width: 800px; padding-left: 100px; margin-top: 8px; }
 </style>

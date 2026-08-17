@@ -1,409 +1,1052 @@
-"""基于测试数据方案生成 500 条工业场景测试数据
+"""基于《精密五金工厂设备与产品》场景生成测试数据
 
-执行前会清空所有已有数据（设备、工单、知识库、备件）。
+场景：中型精密五金加工厂（汽车零部件 / 3C 电子）。
+设备 8 类共 200 台（按占比），有日志 83% / 无日志 17%（monitor_extra.has_log 标记，纯数据层面），
+工单 200 单，知识 50 条（从已完成工单获得，按故障码去重），备件按故障模板沉淀。
+
+执行前会清空设备、工单、知识库、备件（**保留用户账号**，不做用户重建）。
 """
 import random
-import uuid
+import sys
+import os
 from datetime import datetime, date, timedelta
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from sqlalchemy import text
 from app.core.database import SessionLocal
 from app.models.device import Device
 from app.models.work_order import WorkOrder, WorkOrderStatus
 from app.models.knowledge import KnowledgeItem, KnowledgeStatus
 from app.models.spare_part import SparePart
-from app.models.user import User, UserRole
+from app.models.user import User
 
 random.seed(42)
 
 # ==================== 配置 ====================
-DEVICE_TYPES = ['注塑机', '空压机', '数控机床', '输送设备', 'PLC系统']
-TYPE_WEIGHTS = [0.3, 0.2, 0.2, 0.15, 0.15]
+DEVICE_COUNT = 200
+WO_TARGET = 200
+KNOWLEDGE_CAP = 50
+HAS_LOG_MIX_RATE = 0.6  # 混合类型（冲床/磨床）中 60% 有日志
+
+# 设备类型：(类型, 占比, 日志能力)  True=有日志 / False=无日志 / 'mix'=混合
+# 占比按文档《精密五金工厂设备与产品》，合计 83% 有日志 / 17% 无日志
+DEVICE_TYPES = [
+    ('CNC车床', 0.25, True),
+    ('CNC加工中心', 0.15, True),
+    ('冲床', 0.20, 'mix'),
+    ('激光切割机', 0.10, True),
+    ('数控折弯机', 0.08, True),
+    ('线切割', 0.07, True),
+    ('磨床', 0.10, 'mix'),
+    ('空压机', 0.05, False),
+]
 
 MANUFACTURERS = {
-    '注塑机': ['海天', '震雄', '伊之密'],
-    '空压机': ['阿特拉斯·科普柯', '复盛', '寿力'],
-    '数控机床': ['发那科', '西门子', '三菱'],
-    '输送设备': ['三一重工', '中联重科', '徐工'],
-    'PLC系统': ['三菱', '西门子', '欧姆龙'],
+    'CNC车床': ['广州数控', '宝鸡机床', '大隈机械'],
+    'CNC加工中心': ['发那科', '三菱电机', '兄弟机床'],
+    '冲床': ['协易机械', '金丰机械', '扬力集团'],
+    '激光切割机': ['大族激光', '华工激光', '通快中国'],
+    '数控折弯机': ['亚威机床', '百超中国', '爱克机械'],
+    '线切割': ['沙迪克', '三菱电机', '西部电机'],
+    '磨床': ['米克朗', '上海机床', '小巨人机械'],
+    '空压机': ['阿特拉斯·科普柯', '复盛机械', '寿力机械'],
 }
 
 MODELS = {
-    '注塑机': ['天润ME系列', '天锐VE系列', '天翔SA系列'],
+    'CNC车床': ['GSK980系列', 'CK6150系列', 'LB-3000EX'],
+    'CNC加工中心': ['0i-MF系列', 'M80A系列', 'TC-S2D'],
+    '冲床': ['SNS系列', 'SH系列', 'J21系列'],
+    '激光切割机': ['HF系列', 'G3015系列', 'TruLaser3030'],
+    '数控折弯机': ['PBH系列', 'Xpert系列', 'BHS系列'],
+    '线切割': ['AQ系列', 'MV系列', 'EPOC系列'],
+    '磨床': ['KGS系列', 'MG系列', 'M1432系列'],
     '空压机': ['GA系列', 'GHS系列', 'LPG系列'],
-    '数控机床': ['0i系列', '840D系列', 'M80系列'],
-    '输送设备': ['B系列', 'SC系列', 'RB系列'],
-    'PLC系统': ['FX系列', 'S7系列', 'Q系列'],
 }
 
 REMARKS = {
-    '注塑机': [
-        '伺服节能型，适用于精密注塑件生产',
-        '液压传动，适用于大型注塑件加工',
-        '全电动型，高速高精度，适合电子行业',
+    'CNC车床': [
+        '伺服节能型，用于电机轴/传动轴车削',
+        '高刚性斜床身，适用于精密螺丝批量加工',
+        '车铣复合，适用于销钉/轴套精密加工',
+    ],
+    'CNC加工中心': [
+        '立式加工中心，适用于支架/外壳铣削钻孔',
+        '高速主轴，适用于 3C 连接器模具精加工',
+        '三轴联动，适用于键槽/法兰端面加工',
+    ],
+    '冲床': [
+        '高速精密冲床，适用于弹片/端子连续冲压',
+        '伺服冲床，适用于电池连接片成形',
+        '气动摩擦离合冲床，适用于支架冲裁',
+    ],
+    '激光切割机': [
+        '光纤激光切割机，适用于支架/外壳下料',
+        '三维五轴激光切割，适用于汽车零部件',
+        '大幅面激光下料，适用于钣金外壳',
+    ],
+    '数控折弯机': [
+        '电液伺服折弯机，适用于支架折弯成型',
+        '数控油电混合折弯机，适用于电机外壳',
+        '同步双缸折弯机，适用于长工件折弯',
+    ],
+    '线切割': [
+        '慢走丝线切割，适用于冲模刃口精加工',
+        '中走丝线切割，适用于模具镶件',
+        '多次切割，加工精度±0.005mm',
+    ],
+    '磨床': [
+        '外圆磨床，适用于轴类外圆精磨',
+        '平面磨床，适用于模具刃口平面精磨',
+        '数控内外圆磨床，适用于高精度轴套',
     ],
     '空压机': [
-        '永磁变频空压机，排气压力0.8MPa',
-        '工频空压机，适用于持续供气场景',
-        '无油空压机，适用于精密设备供气',
-    ],
-    '数控机床': [
-        '五轴联动加工中心，适用于复杂曲面加工',
-        '车铣复合，适用于精密轴类零件',
-        '立式加工中心，适用于模具加工',
-    ],
-    '输送设备': [
-        '皮带输送线，适用于散料输送',
-        '链板输送线，适用于重型工件输送',
-        '滚筒输送线，适用于箱体类物料',
-    ],
-    'PLC系统': [
-        '中大型PLC控制系统，适用于产线自动化',
-        '分布式I/O系统，适用于远程站点控制',
-        '运动控制器，适用于多轴联动控制',
+        '永磁变频空压机，为冲床提供气源',
+        '工频空压机，适用于车间持续供气',
+        '无油空压机，适用于精密装配气动元件',
     ],
 }
 
 # 故障模板：设备类型 -> 故障列表
+# log: 日志型故障携带 {error_code, log_text}（四路检索语义）；None 表示现象型（两路检索语义）
 FAULT_TEMPLATES = {
-    '注塑机': [
+    'CNC车床': [
         {
-            'fault_code': 'FC-001',
-            'fault_description': '电机异响',
-            'fault_phenomenon': '运行时有周期性异响，伴有振动加剧，噪音值>85dB',
-            'root_cause': '电机轴承磨损，滚道疲劳剥落，润滑脂劣化',
-            'solution_steps': '1. 停机断电，拆卸电机端盖\n2. 检查轴承间隙，径向跳动>0.03mm则需更换\n3. 更换SKF-BRG-6205轴承\n4. 添加SHC 625专用润滑脂至填充量1/3\n5. 重新组装并测试运行平稳性',
-            'used_parts': [{'name': 'SKF-BRG-6205轴承', 'qty': 1}, {'name': 'SHC 625润滑脂', 'qty': 0.5}],
-            'tags': ['电机', '轴承', '异响'],
+            'fault_code': 'CL_001',
+            'fault_description': '主轴温升过高报警',
+            'fault_phenomenon': '主轴连续加工后温度超70℃触发报警，加工表面粗糙度上升',
+            'root_cause': '主轴轴承润滑脂干涸、轴承预紧量过大、主轴冷却泵流量不足',
+            'solution_steps': '1. 停机冷却，测量主轴箱体温度\n2. 检查主轴冷却液流量（应>5L/min）\n3. 拆检主轴轴承，补充专用润滑脂至填充量1/3\n4. 复测轴承预紧力，松退至标准值\n5. 空转30分钟确认温度<55℃',
+            'used_parts': [{'name': '主轴轴承7014C', 'qty': 2}, {'name': '主轴润滑脂', 'qty': 1}],
+            'tags': ['主轴', '温升', '报警', '轴承'],
+            'priority': 'HIGH',
+            'log': {'error_code': 'SPN_OT', 'log_text': 'SPN_OT SPINDLE OVER TEMP TEMP=72C'},
         },
         {
-            'fault_code': 'FC-002',
-            'fault_description': '液压系统压力波动',
-            'fault_phenomenon': '压力表指针剧烈摆动，注射量不稳定，产品重量偏差>3%',
-            'root_cause': '液压阀芯磨损，密封圈老化，油液污染',
-            'solution_steps': '1. 停机泄压，拆卸液压阀体\n2. 清洁阀芯和阀座\n3. 更换磨损密封件\n4. 更换液压油过滤器\n5. 重新调试系统压力',
-            'used_parts': [{'name': '液压阀密封件组套', 'qty': 1}, {'name': '液压油过滤器', 'qty': 1}],
-            'tags': ['液压', '压力波动', '密封件'],
+            'fault_code': 'CL_002',
+            'fault_description': 'X轴伺服过流报警',
+            'fault_phenomenon': 'X轴移动时驱动报SV0436过流，电机抖动后停机，报警灯闪',
+            'root_cause': '导轨润滑不足导致卡滞、伺服电机动力线绝缘破损、抱闸未完全释放',
+            'solution_steps': '1. 查看诊断号DGN800定位偏差值\n2. 用兆欧表测电机三相绕组对地绝缘（应>100MΩ）\n3. 检查抱闸电源DC24V及抱闸线圈电阻（正常40±5Ω）\n4. 检查导轨润滑泵油位与油路\n5. 断开联轴器手转丝杠确认无卡死',
+            'used_parts': [{'name': '伺服电机动力线', 'qty': 1}, {'name': '抱闸线圈', 'qty': 1}],
+            'tags': ['伺服', '过流', 'SV0436', '导轨'],
+            'priority': 'HIGH',
+            'log': {'error_code': 'SV0436', 'log_text': 'SV0436 X AXIS: EXCESS CURRENT IN SERVO'},
         },
         {
-            'fault_code': 'FC-003',
-            'fault_description': '射胶量不稳定',
-            'fault_phenomenon': '实际射胶量与设定值偏差>5%，产品重量波动大',
-            'root_cause': '螺杆磨损，止逆环失效，背压阀故障',
-            'solution_steps': '1. 拆卸螺杆组件检查\n2. 测量螺杆外径磨损量\n3. 更换止逆环和密封环\n4. 校准背压阀设定值\n5. 重新进行射胶量测试',
-            'used_parts': [{'name': '止逆环组件', 'qty': 1}, {'name': '螺杆密封环', 'qty': 2}],
-            'tags': ['射胶', '螺杆', '背压'],
+            'fault_code': 'CL_003',
+            'fault_description': '轴类零件轴向尺寸超差',
+            'fault_phenomenon': '车削轴类零件轴向尺寸偏差0.05~0.15mm且有规律性重复',
+            'root_cause': 'X轴丝杠反向间隙过大、刀塔定位偏移、刀具磨损、热漂移',
+            'solution_steps': '1. 用千分表打表测量X轴反向间隙\n2. 在系统参数1829中输入反向间隙补偿值\n3. 检查刀塔重复定位精度（应<0.01mm）\n4. 更换磨损刀片并重新对刀\n5. 热机30分钟后重测尺寸稳定性',
+            'used_parts': [{'name': 'X轴丝杠轴承', 'qty': 1}, {'name': '机夹刀片', 'qty': 4}],
+            'tags': ['尺寸超差', '丝杠', '反向间隙', '对刀'],
+            'priority': 'MEDIUM',
+            'log': None,
         },
         {
-            'fault_code': 'FC-004',
-            'fault_description': '模具温度失控',
-            'fault_phenomenon': '模温机显示温度与实际偏差>10℃，产品缩水率异常',
-            'root_cause': '模温机加热管烧毁，温度传感器失效，冷却水路堵塞',
-            'solution_steps': '1. 检查模温机加热管电阻\n2. 更换损坏的加热管\n3. 清洁或更换温度传感器\n4. 反向冲洗冷却水路\n5. 重新校准温控参数',
-            'used_parts': [{'name': '模温机加热管', 'qty': 2}, {'name': '温度传感器PT100', 'qty': 1}],
-            'tags': ['模具', '温度', '传感器'],
+            'fault_code': 'CL_004',
+            'fault_description': '车削表面振纹',
+            'fault_phenomenon': '工件表面出现周期性振纹，粗糙度Ra>1.6，刀尖有烧灼痕迹',
+            'root_cause': '主轴动平衡破坏、刀架刚性不足、切削参数（转速/进给）不当',
+            'solution_steps': '1. 检查卡盘与主轴法兰连接是否松动\n2. 做主轴动平衡测试，修正不平衡量至G1级\n3. 检查刀架锁紧力与导轨间隙\n4. 降低主轴转速20%或调整进给量\n5. 更换锋利刀片并确认装夹刚性',
+            'used_parts': [{'name': '主轴动平衡块', 'qty': 1}],
+            'tags': ['振纹', '动平衡', '刀架', '表面质量'],
+            'priority': 'MEDIUM',
+            'log': None,
         },
         {
-            'fault_code': 'FC-005',
-            'fault_description': '开合模异响',
-            'fault_phenomenon': '开合模过程中有金属撞击声，模板平行度超差',
-            'root_cause': '格林柱磨损，调模机构间隙过大，润滑不足',
-            'solution_steps': '1. 检查格林柱表面磨损\n2. 测量模板平行度\n3. 调整调模螺母间隙\n4. 加注润滑脂至格林柱油杯\n5. 低速开合模测试',
-            'used_parts': [{'name': '格林柱润滑组件', 'qty': 1}],
-            'tags': ['开合模', '格林柱', '润滑'],
+            'fault_code': 'CL_005',
+            'fault_description': '刀塔换刀不到位',
+            'fault_phenomenon': '刀塔旋转后刀位偏移，报ATC_ERR换刀报警，刀具无法锁紧',
+            'root_cause': '刀塔定位销磨损、鼠齿盘磨损、液压锁紧压力不足',
+            'solution_steps': '1. 在MDI模式单步执行换刀观察刀塔动作\n2. 检查液压锁紧压力（应>4MPa）\n3. 拆检刀塔定位销，磨损>0.1mm则更换\n4. 检查鼠齿盘齿面有无点蚀剥落\n5. 重新校准刀塔原点并测试全部刀位',
+            'used_parts': [{'name': '刀塔定位销', 'qty': 2}, {'name': '鼠齿盘', 'qty': 1}],
+            'tags': ['刀塔', '换刀', 'ATC', '定位销'],
+            'priority': 'HIGH',
+            'log': {'error_code': 'ATC_ERR', 'log_text': 'ATC_ERR TURRET INDEX MISALIGN'},
+        },
+        {
+            'fault_code': 'CL_006',
+            'fault_description': '尾座顶紧力不足',
+            'fault_phenomenon': '加工长轴时工件轴向窜动，中心孔磨损发热',
+            'root_cause': '尾座液压缸密封内泄、套筒磨损、顶紧压力设定偏低',
+            'solution_steps': '1. 检查尾座液压缸密封圈，内泄则更换\n2. 测量套筒与尾座孔间隙（应<0.03mm）\n3. 调整顶紧压力至设定值\n4. 检查中心孔顶尖磨损情况\n5. 重新校准尾座中心高（与主轴偏差<0.02mm）',
+            'used_parts': [{'name': '尾座油缸密封包', 'qty': 1}, {'name': '顶尖', 'qty': 1}],
+            'tags': ['尾座', '顶紧力', '密封', '长轴'],
+            'priority': 'MEDIUM',
+            'log': None,
+        },
+        {
+            'fault_code': 'CL_007',
+            'fault_description': '系统电池电压低报警',
+            'fault_phenomenon': '开机提示PS0002电池报警，存在参数丢失风险',
+            'root_cause': 'CNC后备电池（3.6V锂电池）电压低于3.0V',
+            'solution_steps': '1. 确认机床已断电\n2. 打开控制柜找到电池盒（通常在主板上）\n3. 在通电状态下热更换电池，防止参数丢失\n4. 更换后核对系统参数完整性\n5. 建议每12个月定期更换一次',
+            'used_parts': [{'name': '3.6V锂电池', 'qty': 1}],
+            'tags': ['电池', '电压低', '参数丢失', 'PS0002'],
+            'priority': 'LOW',
+            'log': {'error_code': 'PS0002', 'log_text': 'PS0002 BATTERY VOLTAGE ZERO'},
+        },
+    ],
+    'CNC加工中心': [
+        {
+            'fault_code': 'MC_001',
+            'fault_description': '主轴伺服过载报警',
+            'fault_phenomenon': '铣削加工中主轴驱动器报过载，电机发热停机，加工中断',
+            'root_cause': '切削负载过大、主轴轴承磨损、冷却不良导致热累积',
+            'solution_steps': '1. 检查主轴负载表是否持续超限\n2. 降低切削深度与进给速度\n3. 测量主轴电机电流（正常<额定值）\n4. 拆检主轴轴承磨损情况\n5. 检查主轴冷却回路流量与温度',
+            'used_parts': [{'name': '主轴轴承7014C', 'qty': 2}, {'name': '主轴冷却管', 'qty': 1}],
+            'tags': ['主轴', '过载', '伺服', '铣削'],
+            'priority': 'HIGH',
+            'log': {'error_code': 'SV0436', 'log_text': 'SV0436 SPINDLE EXCESS CURRENT'},
+        },
+        {
+            'fault_code': 'MC_002',
+            'fault_description': '刀库换刀失败',
+            'fault_phenomenon': '换刀过程中刀套未完全到位，ATC报警，刀具掉刀',
+            'root_cause': '刀库定位接近开关感应片偏移、刀臂旋转角度不足、刀套弹簧夹持力不足',
+            'solution_steps': '1. 在MDI模式执行换刀观察刀臂轨迹\n2. 调整刀库定位开关感应距离为2-3mm\n3. 检查刀臂马达刹车片间隙（0.3-0.5mm）\n4. 检查刀套弹簧夹持力（标准>15N）\n5. 重新校准刀臂原点（参数1241）',
+            'used_parts': [{'name': '刀库定位销', 'qty': 2}, {'name': '刀套弹簧', 'qty': 6}],
+            'tags': ['刀库', '换刀', 'ATC', '掉刀'],
+            'priority': 'HIGH',
+            'log': {'error_code': 'ATC_ERR', 'log_text': 'ATC_ERR TOOL CHANGE FAILED'},
+        },
+        {
+            'fault_code': 'MC_003',
+            'fault_description': 'X/Y轴定位偏差',
+            'fault_phenomenon': '零件孔位偏差0.03~0.08mm，X/Y轴重复定位精度>0.02mm',
+            'root_cause': '滚珠丝杠反向间隙大、光栅尺读数头脏污、导轨磨损',
+            'solution_steps': '1. 用激光干涉仪测定位精度与反向间隙\n2. 清洁光栅尺安装面与读数头（无水酒精擦拭）\n3. 预紧丝杠螺母副，调整垫片使轴向间隙<0.01mm\n4. 检查导轨镶条间隙\n5. 重新执行螺距误差补偿',
+            'used_parts': [{'name': '光栅尺读数头', 'qty': 1}, {'name': '滚珠丝杠副', 'qty': 1}],
+            'tags': ['定位偏差', '光栅尺', '丝杠', '补偿'],
+            'priority': 'MEDIUM',
+            'log': None,
+        },
+        {
+            'fault_code': 'MC_004',
+            'fault_description': '主轴转速波动',
+            'fault_phenomenon': '主轴实际转速与指令偏差>5%，加工表面出现波纹',
+            'root_cause': '主轴编码器反馈异常、传动皮带松动、主轴驱动器参数漂移',
+            'solution_steps': '1. 检查主轴编码器连接与波形\n2. 检查传动皮带张紧度（下垂量<10mm）\n3. 用示波器观察反馈信号\n4. 重新整定主轴速度环参数\n5. 空转各转速档验证',
+            'used_parts': [{'name': '主轴编码器', 'qty': 1}, {'name': '传动皮带', 'qty': 1}],
+            'tags': ['主轴', '转速波动', '编码器', '皮带'],
+            'priority': 'MEDIUM',
+            'log': {'error_code': 'SPN_AL', 'log_text': 'SPN_AL SPINDLE SPEED ERROR'},
+        },
+        {
+            'fault_code': 'MC_005',
+            'fault_description': '冷却液流量不足',
+            'fault_phenomenon': '冷却液喷嘴出水无力，加工区温度升高导致刀具寿命下降',
+            'root_cause': '冷却泵叶轮磨损或堵塞、过滤器堵塞、管路结垢',
+            'solution_steps': '1. 清洗冷却液箱并更换切削液（浓度5-8%）\n2. 清洗泵入口过滤器（80目不锈钢滤网）\n3. 拆检冷却泵叶轮，磨损则更换\n4. 用管路清洗剂循环清洗去垢\n5. 检查喷嘴是否堵塞',
+            'used_parts': [{'name': '冷却泵叶轮', 'qty': 1}, {'name': '冷却液过滤器滤芯', 'qty': 2}],
+            'tags': ['冷却液', '流量', '冷却泵', '过滤器'],
+            'priority': 'MEDIUM',
+            'log': None,
+        },
+        {
+            'fault_code': 'MC_006',
+            'fault_description': '系统电池电压低报警',
+            'fault_phenomenon': '开机显示电池报警，参数存在丢失风险',
+            'root_cause': 'CNC后备电池电压低于3.0V',
+            'solution_steps': '1. 断电后打开控制柜\n2. 通电状态下热更换3.6V锂电池\n3. 核对系统参数与加工程序完整性\n4. 每12个月定期更换',
+            'used_parts': [{'name': '3.6V锂电池', 'qty': 1}],
+            'tags': ['电池', '电压低', '参数丢失'],
+            'priority': 'LOW',
+            'log': {'error_code': 'PS0002', 'log_text': 'PS0002 BATTERY VOLTAGE ZERO'},
+        },
+        {
+            'fault_code': 'MC_007',
+            'fault_description': '排屑器卡死',
+            'fault_phenomenon': '排屑器电机转但螺旋叶片不转，切屑堆积溢出',
+            'root_cause': '螺旋叶片与壳体间隙卡屑、减速机链条断裂、电机过载保护跳闸',
+            'solution_steps': '1. 断开电源清理排屑器内积屑\n2. 检查减速机链条张紧度，断裂则更换\n3. 检查螺旋叶片磨损，外径磨损>3mm更换\n4. 调整电机过载保护为额定电流1.1倍\n5. 试运行确认无卡滞',
+            'used_parts': [{'name': '排屑螺旋叶片', 'qty': 1}, {'name': '10A-1链条', 'qty': 1}],
+            'tags': ['排屑器', '卡死', '链条', '切屑'],
+            'priority': 'LOW',
+            'log': None,
+        },
+    ],
+    '冲床': [
+        {
+            'fault_code': 'ST_001',
+            'fault_description': '滑块行程不到位',
+            'fault_phenomenon': '冲压时滑块下死点位置偏移，冲压件尺寸波动，报SLD_ERR',
+            'root_cause': '离合器摩擦片磨损、气源压力不足、曲柄连杆间隙大',
+            'solution_steps': '1. 检查气源压力（应>0.5MPa）\n2. 拆检离合器摩擦片厚度，磨损超限更换\n3. 测量曲柄连杆间隙（应<0.05mm）\n4. 调整滑块下死点位置\n5. 空冲校验冲压行程',
+            'used_parts': [{'name': '离合器摩擦片', 'qty': 2}, {'name': '冲床气源调压阀', 'qty': 1}],
+            'tags': ['滑块', '行程', '离合器', '气源'],
+            'priority': 'HIGH',
+            'log': {'error_code': 'SLD_ERR', 'log_text': 'SLD_ERR SLIDE POSITION DEVIATION'},
+        },
+        {
+            'fault_code': 'ST_002',
+            'fault_description': '冲压件毛刺飞边过大',
+            'fault_phenomenon': '弹片/端子冲压件毛刺>0.05mm，飞边影响装配与外观',
+            'root_cause': '模具刃口磨损、冲裁间隙过大、凸凹模对中不良',
+            'solution_steps': '1. 检查凸凹模刃口磨损量（应<0.1mm）\n2. 测量冲裁间隙（材料厚度的8-12%）\n3. 重新对中凸凹模\n4. 刃口磨损则送修磨或更换\n5. 试冲并检验毛刺高度',
+            'used_parts': [{'name': '冲裁模具刃口', 'qty': 1}],
+            'tags': ['毛刺', '飞边', '冲裁间隙', '模具'],
+            'priority': 'MEDIUM',
+            'log': None,
+        },
+        {
+            'fault_code': 'ST_003',
+            'fault_description': '模具刃口崩缺',
+            'fault_phenomenon': '冲压过程中模具刃口崩块，冲压件出现缺口缺陷',
+            'root_cause': '模具材质疲劳、刃口硬度偏高脆断、混入异物冲压',
+            'solution_steps': '1. 停机检查刃口崩缺部位与大小\n2. 检查料带内有无异物/叠料\n3. 崩缺小于0.5mm可修磨，否则更换刃口\n4. 检查模具间隙与导向精度\n5. 试冲并全检首件',
+            'used_parts': [{'name': '冲裁模具刃口', 'qty': 1}],
+            'tags': ['模具', '刃口崩缺', '异物', '冲压'],
+            'priority': 'HIGH',
+            'log': None,
+        },
+        {
+            'fault_code': 'ST_004',
+            'fault_description': '离合器制动器异响',
+            'fault_phenomenon': '冲床运行时离合器/制动器发出周期性金属摩擦异响',
+            'root_cause': '摩擦片磨损不均、分离间隙调整不当、转键/销磨损',
+            'solution_steps': '1. 停机拆检离合器摩擦片磨损情况\n2. 调整摩擦片分离间隙至标准值\n3. 检查转键与销孔磨损，磨损则更换\n4. 补充离合器润滑脂\n5. 低速试运行确认无异响',
+            'used_parts': [{'name': '离合器摩擦片', 'qty': 2}, {'name': '转键', 'qty': 1}],
+            'tags': ['离合器', '制动器', '异响', '摩擦片'],
+            'priority': 'MEDIUM',
+            'log': None,
+        },
+        {
+            'fault_code': 'ST_005',
+            'fault_description': '送料步距偏差',
+            'fault_phenomenon': '连续模送料步距偏移，冲压件定位孔位置偏差，报FED_ERR',
+            'root_cause': '送料机辊轮打滑、伺服送料参数漂移、料带张力不稳',
+            'solution_steps': '1. 检查送料机辊轮压紧力与表面磨损\n2. 校准伺服送料步距参数\n3. 检查料带张力装置与缓冲轮\n4. 检查导料槽有无卡阻\n5. 空送校验步距精度',
+            'used_parts': [{'name': '送料机辊轮', 'qty': 1}, {'name': '伺服编码器', 'qty': 1}],
+            'tags': ['送料', '步距', '伺服', '连续模'],
+            'priority': 'MEDIUM',
+            'log': {'error_code': 'FED_ERR', 'log_text': 'FED_ERR FEED STEP DEVIATION'},
+        },
+        {
+            'fault_code': 'ST_006',
+            'fault_description': '冲压吨位超限报警',
+            'fault_phenomenon': '冲压过程吨位监控超限报警，报TON_OVR，自动停机',
+            'root_cause': '材料厚度异常、模具闭合高度偏低、双料重叠冲压',
+            'solution_steps': '1. 查看吨位监控曲线定位超限行程\n2. 检测来料厚度是否超规格\n3. 检查模具闭合高度与垫片\n4. 检查料带是否双料/叠料\n5. 调整吨位报警阈值至标准',
+            'used_parts': [{'name': '吨位传感器', 'qty': 1}],
+            'tags': ['吨位', '超限', '闭合高度', '叠料'],
+            'priority': 'HIGH',
+            'log': {'error_code': 'TON_OVR', 'log_text': 'TON_OVR TONNAGE OVER LIMIT'},
+        },
+        {
+            'fault_code': 'ST_007',
+            'fault_description': '安全光栅误触发',
+            'fault_phenomenon': '无人员进入时安全光栅频繁触发，冲床异常停机',
+            'root_cause': '光栅镜面脏污、对中偏移、振动导致光路中断',
+            'solution_steps': '1. 清洁光栅发射/接收端镜面\n2. 检查光栅对中与固定支架\n3. 检查光栅供电电压稳定\n4. 检查现场有无反光物体干扰\n5. 重新自检并试运行',
+            'used_parts': [{'name': '安全光栅', 'qty': 1}],
+            'tags': ['安全光栅', '误触发', '光路'],
+            'priority': 'HIGH',
+            'log': {'error_code': 'LG_ERR', 'log_text': 'LG_ERR LIGHT CURTAIN TRIGGERED'},
+        },
+        {
+            'fault_code': 'ST_008',
+            'fault_description': '气源压力不足',
+            'fault_phenomenon': '冲床动作缓慢无力，离合器打滑，气压表读数低于0.4MPa',
+            'root_cause': '空压机供气不足、管路泄漏、储气罐排水不及时',
+            'solution_steps': '1. 检查空压机运行与输出压力\n2. 沿管路检查泄漏点（听声/肥皂水）\n3. 排净储气罐积水\n4. 检查过滤器/调压阀设定\n5. 恢复气压至0.5-0.6MPa',
+            'used_parts': [{'name': '气源过滤器', 'qty': 1}, {'name': '气管接头', 'qty': 4}],
+            'tags': ['气源', '压力不足', '管路', '泄漏'],
+            'priority': 'MEDIUM',
+            'log': None,
+        },
+    ],
+    '激光切割机': [
+        {
+            'fault_code': 'LC_001',
+            'fault_description': '激光功率衰减',
+            'fault_phenomenon': '切割厚度下降，相同参数下切割速度明显变慢，报PWR_LOW',
+            'root_cause': '保护镜片/聚焦镜污染、激光器输出功率老化、光纤耦合损耗',
+            'solution_steps': '1. 检查保护镜片与聚焦镜，污染则更换\n2. 用功率计实测激光输出功率\n3. 检查光纤端面清洁度\n4. 激光器老化则调整功率补偿或送修\n5. 重新标定功率曲线',
+            'used_parts': [{'name': '保护镜片', 'qty': 2}, {'name': '聚焦镜', 'qty': 1}],
+            'tags': ['激光功率', '镜片', '衰减', '光纤'],
+            'priority': 'HIGH',
+            'log': {'error_code': 'PWR_LOW', 'log_text': 'PWR_LOW LASER OUTPUT POWER DROP'},
+        },
+        {
+            'fault_code': 'LC_002',
+            'fault_description': '切割头碰撞报警',
+            'fault_phenomenon': '切割头与板材碰撞，报HED_CLS，切割头自动抬升停机',
+            'root_cause': '板材翘曲变形、切割头高度感应器失效、程序轨迹越界',
+            'solution_steps': '1. 检查板材平整度，翘曲则压料固定\n2. 测试切割头高度传感器（电容式）\n3. 检查程序轨迹与板材原点\n4. 校准切割头Z轴零点\n5. 低速空跑验证轨迹',
+            'used_parts': [{'name': '切割头高度传感器', 'qty': 1}],
+            'tags': ['切割头', '碰撞', '传感器', '轨迹'],
+            'priority': 'HIGH',
+            'log': {'error_code': 'HED_CLS', 'log_text': 'HED_CLS CUTTING HEAD COLLISION'},
+        },
+        {
+            'fault_code': 'LC_003',
+            'fault_description': '焦点位置偏移',
+            'fault_phenomenon': '切割缝变宽、切不透或过烧，焦点不在板材表面',
+            'root_cause': '调焦机构松动、焦距标定丢失、镜组位移',
+            'solution_steps': '1. 执行焦点标定程序重新确定零点\n2. 检查调焦电机与丝杠是否松动\n3. 检查聚焦镜组固定是否牢靠\n4. 用试切板验证焦点位置\n5. 锁定调焦机构防松动',
+            'used_parts': [{'name': '调焦机构', 'qty': 1}],
+            'tags': ['焦点', '调焦', '标定', '切割质量'],
+            'priority': 'MEDIUM',
+            'log': None,
+        },
+        {
+            'fault_code': 'LC_004',
+            'fault_description': '辅助气体压力不足',
+            'fault_phenomenon': '切割时辅助气吹不透，挂渣严重，报GAS_LOW',
+            'root_cause': '气源压力低、减压阀故障、气管泄漏或堵塞',
+            'solution_steps': '1. 检查气源输出压力（应>1.0MPa）\n2. 检查减压阀设定与密封\n3. 沿气管检查泄漏点\n4. 清洁切割头气嘴\n5. 恢复辅助气压并试切',
+            'used_parts': [{'name': '减压阀', 'qty': 1}, {'name': '气嘴', 'qty': 1}],
+            'tags': ['辅助气', '压力不足', '减压阀', '挂渣'],
+            'priority': 'MEDIUM',
+            'log': {'error_code': 'GAS_LOW', 'log_text': 'GAS_LOW ASSIST GAS PRESSURE LOW'},
+        },
+        {
+            'fault_code': 'LC_005',
+            'fault_description': '切割面挂渣粗糙',
+            'fault_phenomenon': '切割断面粗糙挂渣，需后处理打磨，合格率下降',
+            'root_cause': '切割参数不当、透镜污染、辅助气压不稳定',
+            'solution_steps': '1. 清洁聚焦镜与保护镜片\n2. 检查切割速度/功率/气压参数匹配\n3. 检查辅助气压稳定性\n4. 检查板材材质与表面状况\n5. 用试切样板重新标定工艺参数',
+            'used_parts': [{'name': '切割透镜', 'qty': 1}],
+            'tags': ['切割面', '挂渣', '工艺参数', '透镜'],
+            'priority': 'MEDIUM',
+            'log': None,
+        },
+        {
+            'fault_code': 'LC_006',
+            'fault_description': '冷却水温度过高',
+            'fault_phenomenon': '冷水机报警CW_OT，激光器冷却水温超35℃，触发保护',
+            'root_cause': '冷水机散热不良、水垢堆积、冷却循环流量不足',
+            'solution_steps': '1. 清洗冷水机散热翅片与冷凝器\n2. 检测冷却水流量（应>10L/min）\n3. 清理水垢并更换冷却液\n4. 检查压缩机与风扇运转\n5. 恢复水温并连续监控',
+            'used_parts': [{'name': '冷水机滤芯', 'qty': 1}, {'name': '激光器冷却液', 'qty': 10}],
+            'tags': ['冷却水', '温度过高', '冷水机', '水垢'],
+            'priority': 'HIGH',
+            'log': {'error_code': 'CW_OT', 'log_text': 'CW_OT COOLING WATER OVER TEMP'},
+        },
+        {
+            'fault_code': 'LC_007',
+            'fault_description': 'XY平台伺服轴报警',
+            'fault_phenomenon': 'X/Y轴移动报SV_ERR伺服报警，平台抖动或卡停',
+            'root_cause': '导轨滑块污染卡滞、驱动器过载、光栅/编码器脏污',
+            'solution_steps': '1. 检查导轨滑块润滑与异物\n2. 查看驱动器报警代码\n3. 清洁光栅尺/编码器\n4. 检查拖链电缆有无破损\n5. 低速移动验证并复位',
+            'used_parts': [{'name': '导轨滑块', 'qty': 2}, {'name': '拖链电缆', 'qty': 1}],
+            'tags': ['XY轴', '伺服', '报警', '导轨'],
+            'priority': 'MEDIUM',
+            'log': {'error_code': 'SV_ERR', 'log_text': 'SV_ERR XY SERVO DRIVE ALARM'},
+        },
+    ],
+    '数控折弯机': [
+        {
+            'fault_code': 'BN_001',
+            'fault_description': '折弯角度误差大',
+            'fault_phenomenon': '折弯件角度偏差>1°，同批工件一致性差',
+            'root_cause': '挠度补偿失效、Y轴定位偏差、板材回弹未补偿',
+            'solution_steps': '1. 检查挠度补偿装置是否起作用\n2. 用角度仪实测折弯角度并与设定对比\n3. 检查Y轴滑块定位精度\n4. 校核板材回弹系数重新编程\n5. 试折首件并微调补偿',
+            'used_parts': [{'name': '挠度补偿垫片', 'qty': 2}],
+            'tags': ['折弯角度', '挠度补偿', '回弹'],
+            'priority': 'MEDIUM',
+            'log': None,
+        },
+        {
+            'fault_code': 'BN_002',
+            'fault_description': 'Y轴伺服压力异常',
+            'fault_phenomenon': '折弯时Y轴伺服压力波动，报YAX_OVR，滑块动作不稳',
+            'root_cause': '液压泵内泄、伺服阀卡滞、油缸密封磨损',
+            'solution_steps': '1. 查看Y轴压力曲线定位异常点\n2. 检查液压泵输出压力与流量\n3. 拆洗伺服阀阀芯\n4. 检查油缸密封件磨损\n5. 重新整定伺服压力参数',
+            'used_parts': [{'name': '伺服阀', 'qty': 1}, {'name': '油缸密封包', 'qty': 1}],
+            'tags': ['Y轴', '伺服压力', '伺服阀', '液压'],
+            'priority': 'HIGH',
+            'log': {'error_code': 'YAX_OVR', 'log_text': 'YAX_OVR Y AXIS SERVO OVERLOAD'},
+        },
+        {
+            'fault_code': 'BN_003',
+            'fault_description': '后挡料定位不准',
+            'fault_phenomenon': '后挡料挡指定位偏差，折弯边长度不稳定，报BAK_ERR',
+            'root_cause': '后挡料丝杠间隙、伺服电机丢步、挡指磨损',
+            'solution_steps': '1. 检查后挡料丝杠反向间隙\n2. 检查伺服电机与编码器连接\n3. 清洁丝杠并补充润滑脂\n4. 磨损挡指更换\n5. 重新执行后挡料零点标定',
+            'used_parts': [{'name': '后挡料丝杠', 'qty': 1}, {'name': '后挡料挡指', 'qty': 2}],
+            'tags': ['后挡料', '定位', '丝杠', '零点标定'],
+            'priority': 'MEDIUM',
+            'log': {'error_code': 'BAK_ERR', 'log_text': 'BAK_ERR BACKGAUGE POSITION ERROR'},
+        },
+        {
+            'fault_code': 'BN_004',
+            'fault_description': '液压油温过高',
+            'fault_phenomenon': '液压油温度超65℃，系统降速保护，油液变色',
+            'root_cause': '冷却器堵塞、溢流频繁、液压泵内泄发热',
+            'solution_steps': '1. 清洗冷却器管程并检查冷却水流量\n2. 检查系统压力设定是否偏高\n3. 拆检液压泵内泄情况\n4. 更换液压油与滤芯\n5. 恢复油温并连续监控',
+            'used_parts': [{'name': '冷却器密封垫', 'qty': 1}, {'name': '液压油滤芯', 'qty': 2}],
+            'tags': ['油温', '冷却器', '液压油', '过热'],
+            'priority': 'MEDIUM',
+            'log': None,
+        },
+        {
+            'fault_code': 'BN_005',
+            'fault_description': '模具夹紧不到位',
+            'fault_phenomenon': '上/下模夹紧后松脱，折弯时模具位移，工件压伤',
+            'root_cause': '夹紧机构磨损、液压/气动夹紧压力不足',
+            'solution_steps': '1. 检查夹紧爪磨损情况\n2. 检查夹紧液压/气压压力\n3. 清洁模具安装槽异物\n4. 检查模具定位销与键\n5. 重新夹紧并试折',
+            'used_parts': [{'name': '夹紧爪', 'qty': 2}],
+            'tags': ['模具夹紧', '夹紧爪', '压力'],
+            'priority': 'HIGH',
+            'log': None,
+        },
+        {
+            'fault_code': 'BN_006',
+            'fault_description': '折弯滑块不同步',
+            'fault_phenomenon': '左右油缸滑块下降不同步，折弯件扭曲，报SYNC_ERR',
+            'root_cause': '同步阀卡滞、两侧油缸内泄差异、位置反馈偏差',
+            'solution_steps': '1. 查看两侧滑块位置反馈曲线\n2. 拆洗同步阀阀芯\n3. 检查两侧油缸密封与内泄\n4. 校核位置传感器零点\n5. 重新整定同步参数',
+            'used_parts': [{'name': '同步阀', 'qty': 1}, {'name': '油缸密封包', 'qty': 1}],
+            'tags': ['同步', '滑块', '同步阀', '油缸'],
+            'priority': 'HIGH',
+            'log': {'error_code': 'SYNC_ERR', 'log_text': 'SYNC_ERR SLIDE SYNC DEVIATION'},
+        },
+        {
+            'fault_code': 'BN_007',
+            'fault_description': '油泵电机过载',
+            'fault_phenomenon': '油泵电机电流超限，热保护跳闸，报PMP_OVR',
+            'root_cause': '负载过大、三相电压不平衡、油泵机械卡滞',
+            'solution_steps': '1. 用钳形表测三相电流（不平衡<10%）\n2. 检查电压是否缺相或过低\n3. 手动盘动油泵确认无卡滞\n4. 检查油位与油泵进油滤网\n5. 复位热保护并试运行',
+            'used_parts': [{'name': '油泵进油滤网', 'qty': 1}, {'name': '热继电器', 'qty': 1}],
+            'tags': ['油泵', '电机过载', '电流', '跳闸'],
+            'priority': 'MEDIUM',
+            'log': {'error_code': 'PMP_OVR', 'log_text': 'PMP_OVR PUMP MOTOR OVERLOAD'},
+        },
+    ],
+    '线切割': [
+        {
+            'fault_code': 'WD_001',
+            'fault_description': '切割精度超差',
+            'fault_phenomenon': '模具刃口尺寸偏差>0.01mm，圆度/垂直度超差',
+            'root_cause': '丝架垂直度偏移、导轮磨损、电极丝张力不稳',
+            'solution_steps': '1. 校核丝架与工件台垂直度\n2. 检查上下导轮磨损情况\n3. 检查电极丝张力（用张力计测量）\n4. 检查机床水平与丝杠间隙\n5. 重新标定加工参数',
+            'used_parts': [{'name': '线切割导轮', 'qty': 2}],
+            'tags': ['切割精度', '导轮', '垂直度', '张力'],
+            'priority': 'MEDIUM',
+            'log': None,
+        },
+        {
+            'fault_code': 'WD_002',
+            'fault_description': '断丝报警',
+            'fault_phenomenon': '加工中断丝，报WIRE_BRK，工件表面有放电痕迹',
+            'root_cause': '电极丝张力过大、工件含导电杂质、导轮卡滞',
+            'solution_steps': '1. 检查电极丝张力设定（应<标准值）\n2. 检查工件材料含杂/氧化层\n3. 检查上下导轮是否卡滞\n4. 检查脉冲电源放电参数\n5. 重新穿丝并降速试切',
+            'used_parts': [{'name': '电极丝', 'qty': 1}, {'name': '线切割导轮', 'qty': 1}],
+            'tags': ['断丝', '张力', '导轮', '穿丝'],
+            'priority': 'HIGH',
+            'log': {'error_code': 'WIRE_BRK', 'log_text': 'WIRE_BRK WIRE BROKEN'},
+        },
+        {
+            'fault_code': 'WD_003',
+            'fault_description': '电极丝张力波动',
+            'fault_phenomenon': '加工中张力计读数波动>0.5N，报TNS_ERR，切割面质量不稳',
+            'root_cause': '张力轮磨损、伺服张力器故障、丝筒排线不良',
+            'solution_steps': '1. 检查张力轮与压轮磨损\n2. 检查伺服张力器动作是否平顺\n3. 检查丝筒排线是否整齐\n4. 清洁导丝路径\n5. 重新标定张力值并试切',
+            'used_parts': [{'name': '张力轮', 'qty': 1}, {'name': '张力传感器', 'qty': 1}],
+            'tags': ['张力', '波动', '张力轮', '丝筒'],
+            'priority': 'MEDIUM',
+            'log': {'error_code': 'TNS_ERR', 'log_text': 'TNS_ERR WIRE TENSION ERROR'},
+        },
+        {
+            'fault_code': 'WD_004',
+            'fault_description': '加工电流异常',
+            'fault_phenomenon': '放电电流不稳或偏大，切割速度异常，有烧蚀痕迹',
+            'root_cause': '脉冲电源模块故障、导电块接触不良、电极丝污染',
+            'solution_steps': '1. 检查脉冲电源输出波形\n2. 检查导电块磨损与接触\n3. 检查电极丝表面污染\n4. 检查工件装夹与接地\n5. 重新调整放电参数',
+            'used_parts': [{'name': '脉冲电源模块', 'qty': 1}, {'name': '导电块', 'qty': 2}],
+            'tags': ['加工电流', '脉冲电源', '导电块', '放电'],
+            'priority': 'HIGH',
+            'log': None,
+        },
+        {
+            'fault_code': 'WD_005',
+            'fault_description': '工作液浓度不足',
+            'fault_phenomenon': '工作液浑浊浓度低，冷却排屑差，切割面粗糙',
+            'root_cause': '混液比例失调、循环滤芯堵塞、工作液变质',
+            'solution_steps': '1. 检测工作液浓度（用浓度计）\n2. 补充浓缩工作液至标准比例\n3. 更换循环滤芯\n4. 清洗工作液箱\n5. 循环均匀后试切',
+            'used_parts': [{'name': '线切割工作液', 'qty': 20}, {'name': '循环滤芯', 'qty': 1}],
+            'tags': ['工作液', '浓度', '滤芯', '排屑'],
+            'priority': 'LOW',
+            'log': None,
+        },
+        {
+            'fault_code': 'WD_006',
+            'fault_description': 'XY轴驱动报警',
+            'fault_phenomenon': 'X/Y轴移动报DRV_AL驱动报警，平台抖动或停走',
+            'root_cause': '步进/伺服驱动过载、导轨卡滞、编码器反馈异常',
+            'solution_steps': '1. 查看驱动报警代码\n2. 检查导轨润滑与异物\n3. 手动移动平台感受阻力\n4. 检查驱动电缆与编码器\n5. 低速移动测试并复位',
+            'used_parts': [{'name': '导轨润滑油', 'qty': 1}],
+            'tags': ['XY轴', '驱动', '报警', '导轨'],
+            'priority': 'MEDIUM',
+            'log': {'error_code': 'DRV_AL', 'log_text': 'DRV_AL XY DRIVE ALARM'},
+        },
+        {
+            'fault_code': 'WD_007',
+            'fault_description': '导轮异响卡滞',
+            'fault_phenomenon': '运行时导轮发出周期性异响，转动有卡滞感',
+            'root_cause': '导轮轴承磨损、导轮槽磨损、丝屑缠绕',
+            'solution_steps': '1. 检查导轮转动是否灵活\n2. 拆检导轮轴承磨损\n3. 检查导轮槽磨损与异物\n4. 清理缠绕的丝屑\n5. 更换磨损导轮并校直',
+            'used_parts': [{'name': '导轮轴承', 'qty': 4}],
+            'tags': ['导轮', '异响', '轴承', '卡滞'],
+            'priority': 'LOW',
+            'log': None,
+        },
+    ],
+    '磨床': [
+        {
+            'fault_code': 'MG_001',
+            'fault_description': '磨削烧伤表面发蓝',
+            'fault_phenomenon': '轴类外圆磨削后表面发蓝/发黑，出现磨削烧伤',
+            'root_cause': '砂轮过钝、冷却液不足、进给量过大',
+            'solution_steps': '1. 立即停止磨削检查烧伤范围\n2. 修整砂轮恢复锋利\n3. 检查冷却液流量与喷射角度\n4. 减小进给量或增加光磨次数\n5. 用探伤检查表层裂纹',
+            'used_parts': [{'name': '砂轮', 'qty': 1}],
+            'tags': ['磨削烧伤', '砂轮', '冷却', '进给'],
+            'priority': 'HIGH',
+            'log': None,
+        },
+        {
+            'fault_code': 'MG_002',
+            'fault_description': '主轴振动超标',
+            'fault_phenomenon': '磨削时主轴振动>2.5mm/s，报SPN_VIB，表面有波纹',
+            'root_cause': '砂轮不平衡、主轴轴承磨损、砂轮法兰配合松动',
+            'solution_steps': '1. 用振动仪测主轴振动频谱\n2. 检查砂轮静平衡/动平衡\n3. 检查砂轮法兰配合与紧固\n4. 拆检主轴轴承磨损\n5. 重新修整并平衡砂轮',
+            'used_parts': [{'name': '砂轮', 'qty': 1}, {'name': '砂轮法兰', 'qty': 1}],
+            'tags': ['振动', '砂轮平衡', '主轴轴承', '波纹'],
+            'priority': 'MEDIUM',
+            'log': {'error_code': 'SPN_VIB', 'log_text': 'SPN_VIB SPINDLE VIBRATION HIGH'},
+        },
+        {
+            'fault_code': 'MG_003',
+            'fault_description': '尺寸精度超差',
+            'fault_phenomenon': '磨削件尺寸偏差>0.005mm，同批一致性差',
+            'root_cause': '砂轮磨损、机床热变形、在线量仪漂移',
+            'solution_steps': '1. 检查砂轮磨损并及时修整\n2. 测量机床导轨热变形\n3. 校准在线量仪零点\n4. 检查进给机构重复定位精度\n5. 热机后重新标定加工尺寸',
+            'used_parts': [{'name': '砂轮修整金刚笔', 'qty': 1}],
+            'tags': ['尺寸精度', '砂轮磨损', '量仪', '热变形'],
+            'priority': 'MEDIUM',
+            'log': None,
+        },
+        {
+            'fault_code': 'MG_004',
+            'fault_description': '冷却液过滤不良',
+            'fault_phenomenon': '冷却液浑浊有磨屑，工件表面划伤，磨屑堆积',
+            'root_cause': '磁性分离器失效、滤网堵塞、冷却液箱长期未清',
+            'solution_steps': '1. 检查磁性分离器转筒与刮板\n2. 清洗滤网并更换\n3. 清理冷却液箱沉积磨屑\n4. 更换冷却液\n5. 检查冷却泵流量',
+            'used_parts': [{'name': '磁性分离器', 'qty': 1}, {'name': '冷却液滤芯', 'qty': 2}],
+            'tags': ['冷却液', '过滤', '磨屑', '磁性分离器'],
+            'priority': 'LOW',
+            'log': None,
+        },
+        {
+            'fault_code': 'MG_005',
+            'fault_description': '砂轮修整异常',
+            'fault_phenomenon': '修整砂轮时金刚笔跳动，报DRESS_ERR，砂轮表面不平整',
+            'root_cause': '金刚笔磨损、修整速度不当、修整机构进给异常',
+            'solution_steps': '1. 检查金刚笔笔尖磨损\n2. 检查修整进给速度与吃刀量\n3. 检查修整机构导轨润滑\n4. 检查砂轮端面跳动\n5. 重新修整并检测砂轮形状',
+            'used_parts': [{'name': '砂轮修整金刚笔', 'qty': 1}],
+            'tags': ['修整', '金刚笔', 'DRESS', '砂轮'],
+            'priority': 'MEDIUM',
+            'log': {'error_code': 'DRESS_ERR', 'log_text': 'DRESS_ERR DRESSING ERROR'},
+        },
+        {
+            'fault_code': 'MG_006',
+            'fault_description': '进给轴爬行',
+            'fault_phenomenon': '进给时工作台/砂轮架出现间歇性爬行，磨削表面有接刀痕',
+            'root_cause': '导轨润滑不足、液压静压失压、导轨刮研不良',
+            'solution_steps': '1. 检查导轨润滑油泵与油路\n2. 检查液压静压系统压力\n3. 清洁导轨并检查刮研面\n4. 检查进给机构间隙\n5. 低速进给测试确认平顺',
+            'used_parts': [{'name': '导轨润滑油', 'qty': 1}, {'name': '导轨油泵', 'qty': 1}],
+            'tags': ['爬行', '导轨', '润滑', '静压'],
+            'priority': 'MEDIUM',
+            'log': None,
+        },
+        {
+            'fault_code': 'MG_007',
+            'fault_description': '砂轮主轴轴承温升高',
+            'fault_phenomenon': '主轴轴承温度超60℃，报BRG_OT，停机保护',
+            'root_cause': '轴承润滑不良、预紧过大、冷却不良',
+            'solution_steps': '1. 检查主轴润滑油位与油路\n2. 测量轴承预紧量并调整\n3. 检查主轴冷却回路\n4. 检查轴承间隙\n5. 恢复温度后试运行',
+            'used_parts': [{'name': '主轴轴承', 'qty': 2}, {'name': '主轴润滑脂', 'qty': 1}],
+            'tags': ['主轴轴承', '温升', '润滑', '预紧'],
+            'priority': 'HIGH',
+            'log': {'error_code': 'BRG_OT', 'log_text': 'BRG_OT SPINDLE BEARING OVER TEMP'},
         },
     ],
     '空压机': [
         {
-            'fault_code': 'E01',
-            'fault_description': '排气温度过高报警',
-            'fault_phenomenon': '排气温度持续>110℃，触发高温报警停机',
-            'root_cause': '冷却器翅片堵塞，空气滤清器压差>50mbar，环境温度>40℃',
-            'solution_steps': '1. 停机泄压\n2. 使用压缩空气清洁冷却器翅片\n3. 更换空气滤清器滤芯\n4. 检查机房通风\n5. 补充ISO 68抗磨液压油至标准油位',
-            'used_parts': [{'name': '空气滤清器滤芯', 'qty': 1}, {'name': 'ISO 68液压油', 'qty': 5}],
-            'tags': ['冷却', '排气温度', '滤芯'],
+            'fault_code': 'CP_001',
+            'fault_description': '排气温度高报警停机',
+            'fault_phenomenon': '螺杆空压机排气温度超110℃，高温报警自动停机',
+            'root_cause': '油冷却器堵塞、温控阀故障、油过滤器堵塞导致润滑油流量不足',
+            'solution_steps': '1. 清洗油冷却器散热翅片\n2. 拆检温控阀阀芯，确认70℃以上正常切换\n3. 更换油过滤器和油气分离器\n4. 检查油位是否在上下限之间\n5. 复位并试运行监控温度',
+            'used_parts': [{'name': '油冷却器', 'qty': 1}, {'name': '空压机油过滤器', 'qty': 1}],
+            'tags': ['排气温度', '高温', '油冷却器', '温控阀'],
+            'priority': 'HIGH',
+            'log': None,
         },
         {
-            'fault_code': 'E03',
-            'fault_description': '电机过载保护',
-            'fault_phenomenon': '电机电流>额定值15%，过载保护器动作停机',
-            'root_cause': '电机轴承卡滞，散热风扇损坏，负载过大',
-            'solution_steps': '1. 检查电机负载电流\n2. 清洁电机散热片和风扇\n3. 检查电机轴承状态\n4. 测量绝缘电阻\n5. 复位过载保护器后试运行',
-            'used_parts': [{'name': '电机散热风扇', 'qty': 1}],
-            'tags': ['电机', '过载', '散热'],
+            'fault_code': 'CP_002',
+            'fault_description': '排气量不足压力低',
+            'fault_phenomenon': '储气罐压力上升缓慢，用气端压力低于0.6MPa',
+            'root_cause': '进气过滤器堵塞、进气阀无法完全打开、螺杆间隙过大',
+            'solution_steps': '1. 更换进气过滤器滤芯\n2. 检查进气阀气缸与电磁阀动作\n3. 测量主机螺杆间隙\n4. 检查最小压力阀密封\n5. 恢复压力并测试排气量',
+            'used_parts': [{'name': '进气过滤器滤芯', 'qty': 1}, {'name': '进气阀维修包', 'qty': 1}],
+            'tags': ['排气量', '压力', '进气阀', '过滤器'],
+            'priority': 'MEDIUM',
+            'log': None,
         },
         {
-            'fault_code': 'E08',
-            'fault_description': '冷却器堵塞',
-            'fault_phenomenon': '冷却效果下降，油温>90℃，排气温度偏高',
-            'root_cause': '冷却器内部结垢，翅片间粉尘堆积',
-            'solution_steps': '1. 拆卸冷却器端盖\n2. 使用专用清洗剂循环清洗\n3. 压缩空气吹干\n4. 检查冷却风扇运转\n5. 重新装配后测试',
-            'used_parts': [{'name': '冷却器密封垫', 'qty': 2}, {'name': '冷却器清洗剂', 'qty': 2}],
-            'tags': ['冷却器', '堵塞', '清洗'],
+            'fault_code': 'CP_003',
+            'fault_description': '油耗过大跑油',
+            'fault_phenomenon': '润滑油消耗>50ml/h，油气分离器排油管持续滴油',
+            'root_cause': '油气分离器芯破损、回油管路堵塞、油位过高',
+            'solution_steps': '1. 更换油气分离器芯\n2. 拆下回油管吹通，检查回油单向阀\n3. 放油至正常油位\n4. 检查最小压力阀开启压力（应>0.4MPa）\n5. 运行观察耗油量',
+            'used_parts': [{'name': '油气分离器芯', 'qty': 1}, {'name': '空压机润滑油', 'qty': 20}],
+            'tags': ['油耗', '油气分离器', '回油管', '跑油'],
+            'priority': 'MEDIUM',
+            'log': None,
         },
         {
-            'fault_code': 'E05',
-            'fault_description': '油压过低报警',
-            'fault_phenomenon': '润滑油压力<0.15MPa，触发低油压报警',
-            'root_cause': '油位过低，油泵滤网堵塞，油压调节阀故障',
-            'solution_steps': '1. 检查油位，补充ISO 68液压油\n2. 拆卸清洗油泵进口滤网\n3. 检查油压调节阀\n4. 更换油分离器芯\n5. 测试油压恢复至0.2-0.3MPa',
-            'used_parts': [{'name': '油分离器芯', 'qty': 1}, {'name': '油泵滤网', 'qty': 1}],
-            'tags': ['油压', '润滑', '滤网'],
+            'fault_code': 'CP_004',
+            'fault_description': '无法加载/卸载',
+            'fault_phenomenon': '空压机启动后一直空载不产气，或持续满载不卸载',
+            'root_cause': '压力传感器读数异常、进气阀气缸卡滞、电磁阀故障',
+            'solution_steps': '1. 比较压力传感器读数与机械压力表\n2. 拆检进气阀气缸与阀板并润滑\n3. 测量电磁阀线圈电阻\n4. 检查控制器参数设置\n5. 测试加载卸载动作',
+            'used_parts': [{'name': '压力传感器', 'qty': 1}, {'name': '电磁阀', 'qty': 1}],
+            'tags': ['加载', '卸载', '压力传感器', '电磁阀'],
+            'priority': 'MEDIUM',
+            'log': None,
         },
         {
-            'fault_code': 'E04',
-            'fault_description': '相序错误报警',
-            'fault_phenomenon': '启动时报相序错误，电机反转',
-            'root_cause': '供电线路相序接反，相序保护器故障',
-            'solution_steps': '1. 使用相序表检测进线相序\n2. 调整任意两相线序\n3. 检查相序保护器指示灯\n4. 重新启动测试',
-            'used_parts': [],
-            'tags': ['电气', '相序', '供电'],
-        },
-    ],
-    '数控机床': [
-        {
-            'fault_code': 'FC-101',
-            'fault_description': '主轴过热报警',
-            'fault_phenomenon': '主轴温度>65℃，加工表面出现振纹',
-            'root_cause': '主轴轴承预紧力不当，润滑不良，冷却系统故障',
-            'solution_steps': '1. 检查主轴冷却液流量\n2. 测量主轴轴承温度\n3. 检查主轴润滑脂状态\n4. 清洁冷却管路\n5. 调整主轴参数降速运行',
-            'used_parts': [{'name': '主轴轴承7014C', 'qty': 2}],
-            'tags': ['主轴', '过热', '轴承'],
+            'fault_code': 'CP_005',
+            'fault_description': '主机振动超标',
+            'fault_phenomenon': '空压机主机振动>7.1mm/s，管路晃动，有金属撞击声',
+            'root_cause': '主机轴承磨损、地脚螺栓松动、电机与主机对中不良',
+            'solution_steps': '1. 用振动仪测量主机振动\n2. 紧固地脚螺栓并检查减震垫\n3. 检查电机与主机联轴器对中\n4. 拆检主机轴承磨损\n5. 调整后复测振动',
+            'used_parts': [{'name': '主机轴承', 'qty': 2}, {'name': '减震垫', 'qty': 4}],
+            'tags': ['振动', '主机轴承', '地脚', '对中'],
+            'priority': 'MEDIUM',
+            'log': None,
         },
         {
-            'fault_code': 'FC-102',
-            'fault_description': 'X轴过载报警',
-            'fault_phenomenon': 'X轴移动时力矩过大，伺服驱动器报警',
-            'root_cause': '导轨润滑不足，丝杠轴承损坏，防护罩变形摩擦',
-            'solution_steps': '1. 检查导轨润滑状态\n2. 手动盘动丝杠检查阻力\n3. 检查防护罩是否卡阻\n4. 更换丝杠轴承\n5. 重新润滑并测试',
-            'used_parts': [{'name': '丝杠轴承组', 'qty': 1}, {'name': '导轨润滑脂', 'qty': 1}],
-            'tags': ['X轴', '过载', '导轨'],
-        },
-        {
-            'fault_code': 'FC-103',
-            'fault_description': '加工精度超差',
-            'fault_phenomenon': '零件尺寸偏差>0.05mm，重复定位精度>0.02mm',
-            'root_cause': '反向间隙过大，主轴热漂移，刀具磨损',
-            'solution_steps': '1. 测量反向间隙\n2. 执行螺距误差补偿\n3. 检测主轴热变形量\n4. 更换磨损刀具\n5. 重新校准坐标系',
-            'used_parts': [{'name': '刀具组件', 'qty': 1}],
-            'tags': ['精度', '补偿', '校准'],
-        },
-        {
-            'fault_code': 'FC-104',
-            'fault_description': '换刀故障',
-            'fault_phenomenon': '刀库换刀时卡刀，刀套无法正常翻转',
-            'root_cause': '刀库定位销磨损，液压/气压不足，凸轮机构卡滞',
-            'solution_steps': '1. 检查刀库定位销磨损\n2. 测量气源压力>0.6MPa\n3. 润滑凸轮机构\n4. 手动盘动刀库测试\n5. 重新执行换刀程序',
-            'used_parts': [{'name': '刀库定位销', 'qty': 2}],
-            'tags': ['换刀', '刀库', '卡刀'],
-        },
-        {
-            'fault_code': 'FC-105',
-            'fault_description': '系统死机/黑屏',
-            'fault_phenomenon': '数控系统运行时突然死机，屏幕无显示或蓝屏',
-            'root_cause': '电源模块故障，主板电容老化，散热风扇停转',
-            'solution_steps': '1. 检查24V电源模块输出电压\n2. 清洁主板灰尘\n3. 更换散热风扇\n4. 检查CF卡/硬盘连接\n5. 重新启动并执行系统自检',
-            'used_parts': [{'name': '系统散热风扇', 'qty': 1}],
-            'tags': ['系统', '死机', '电源'],
-        },
-    ],
-    '输送设备': [
-        {
-            'fault_code': 'FC-301',
-            'fault_description': '皮带打滑',
-            'fault_phenomenon': '输送带与驱动滚筒相对滑动，线速度下降>10%',
-            'root_cause': '皮带张力不足，滚筒表面磨损，物料堆积过载',
-            'solution_steps': '1. 调整张紧装置增加张力\n2. 检查滚筒包胶磨损\n3. 清除滚筒表面粘附物\n4. 清理输送带下方积料\n5. 测试空载和负载运行',
-            'used_parts': [{'name': '滚筒包胶层', 'qty': 1}],
-            'tags': ['皮带', '打滑', '张紧'],
-        },
-        {
-            'fault_code': 'FC-302',
-            'fault_description': '托辊卡死',
-            'fault_phenomenon': '输送带运行阻力增大，多处托辊不转动',
-            'root_cause': '托辊轴承进水锈蚀，润滑脂干涸，密封损坏',
-            'solution_steps': '1. 逐个检查托辊转动情况\n2. 拆卸卡死托辊\n3. 更换同型号轴承\n4. 重新加注润滑脂\n5. 安装并调整对中',
-            'used_parts': [{'name': '托辊轴承6204', 'qty': 4}],
-            'tags': ['托辊', '卡死', '轴承'],
-        },
-        {
-            'fault_code': 'FC-303',
-            'fault_description': '跑偏报警',
-            'fault_phenomenon': '输送带向一侧偏移>50mm，触发跑偏开关报警',
-            'root_cause': '滚筒安装偏斜，物料落料点偏载，机架变形',
-            'solution_steps': '1. 测量滚筒水平度\n2. 调整调心托辊\n3. 调整落料导料槽位置\n4. 校正机架水平\n5. 空载运行观察跑偏',
-            'used_parts': [],
-            'tags': ['跑偏', '调心', '滚筒'],
-        },
-        {
-            'fault_code': 'FC-304',
-            'fault_description': '电机过热停机',
-            'fault_phenomenon': '驱动电机外壳温度>80℃，热保护动作',
-            'root_cause': '负载过大，散热不良，电压不平衡>3%',
-            'solution_steps': '1. 测量三相电流平衡\n2. 检查电机散热风扇\n3. 清洁电机外壳灰尘\n4. 减轻输送负载\n5. 测试空载电流',
-            'used_parts': [{'name': '电机散热风扇罩', 'qty': 1}],
-            'tags': ['电机', '过热', '负载'],
-        },
-        {
-            'fault_code': 'FC-305',
-            'fault_description': '减速箱漏油',
-            'fault_phenomenon': '减速箱输入/输出轴处有油液渗漏，油位下降',
-            'root_cause': '油封老化磨损，箱体密封面松动，通气塞堵塞',
-            'solution_steps': '1. 清洁漏油区域\n2. 更换输入轴油封\n3. 更换输出轴油封\n4. 拧紧箱体螺栓\n5. 补充齿轮油至标准油位',
-            'used_parts': [{'name': '输入轴油封', 'qty': 1}, {'name': '输出轴油封', 'qty': 1}, {'name': '齿轮油', 'qty': 3}],
-            'tags': ['减速箱', '漏油', '油封'],
-        },
-    ],
-    'PLC系统': [
-        {
-            'fault_code': '6101',
-            'fault_description': 'RAM错误',
-            'fault_phenomenon': 'PLC报RAM错误代码，程序丢失，系统无法启动',
-            'root_cause': '电池电压过低，RAM芯片老化，电源波动',
-            'solution_steps': '1. 更换PLC后备电池\n2. 重新下载备份程序\n3. 检查24V电源稳定性\n4. 执行内存初始化\n5. 重启PLC并监控',
-            'used_parts': [{'name': 'PLC后备电池', 'qty': 1}],
-            'tags': ['PLC', 'RAM', '电池'],
-        },
-        {
-            'fault_code': '6201',
-            'fault_description': '通信故障',
-            'fault_phenomenon': 'PLC与上位机通信中断，数据采集停止',
-            'root_cause': '通信电缆破损，接口松动，通信模块故障',
-            'solution_steps': '1. 检查通信电缆连接\n2. 测量通信线电阻\n3. 更换损坏网线/DP线\n4. 重启通信模块\n5. 重新建立连接',
-            'used_parts': [{'name': '通信电缆', 'qty': 1}],
-            'tags': ['通信', '网络', '模块'],
-        },
-        {
-            'fault_code': '6300',
-            'fault_description': '程序错误',
-            'fault_phenomenon': 'PLC运行中报程序语法错误，输出异常',
-            'root_cause': '程序逻辑错误，I/O地址冲突，运算溢出',
-            'solution_steps': '1. 使用编程软件在线监控\n2. 定位错误程序段\n3. 修正逻辑错误\n4. 重新编译下载\n5. 测试各功能正常',
-            'used_parts': [],
-            'tags': ['程序', '逻辑', '调试'],
-        },
-        {
-            'fault_code': '6401',
-            'fault_description': '电源异常',
-            'fault_phenomenon': 'PLC电源指示灯不亮，模块不工作',
-            'root_cause': '电源模块保险丝熔断，输入电压超出范围',
-            'solution_steps': '1. 测量输入电压\n2. 检查电源模块保险丝\n3. 更换电源模块\n4. 检查后端负载是否短路\n5. 上电测试',
-            'used_parts': [{'name': 'PLC电源模块', 'qty': 1}, {'name': '保险丝', 'qty': 2}],
-            'tags': ['电源', '模块', '保险丝'],
-        },
-        {
-            'fault_code': '6501',
-            'fault_description': 'I/O模块故障',
-            'fault_phenomenon': '特定输入/输出通道无响应，指示灯异常',
-            'root_cause': 'I/O模块光耦损坏，接线端子松动，模块烧毁',
-            'solution_steps': '1. 检查对应通道接线\n2. 万用表测量输入信号\n3. 更换损坏的I/O模块\n4. 重新接线确认\n5. 测试通道通断',
-            'used_parts': [{'name': 'I/O模块', 'qty': 1}],
-            'tags': ['I/O', '模块', '通道'],
+            'fault_code': 'CP_006',
+            'fault_description': '自动排水阀堵塞',
+            'fault_phenomenon': '储气罐/过滤器排水不畅，气路含水，后处理设备故障',
+            'root_cause': '排水阀杂质卡滞、排水阀失灵、排水定时器故障',
+            'solution_steps': '1. 拆洗自动排水阀阀芯\n2. 检查排水电磁阀动作\n3. 检查排水定时器设定\n4. 手动排水确认管路通畅\n5. 恢复自动排水并观察',
+            'used_parts': [{'name': '自动排水阀', 'qty': 1}],
+            'tags': ['排水阀', '堵塞', '含水', '气路'],
+            'priority': 'LOW',
+            'log': None,
         },
     ],
 }
 
-# 备件规格映射
+# ==================== 故障分类 / 根本原因分类映射 ====================
+# 与 seed_categories.py 的级联分类严格一致，按故障模板的故障码逐条映射，不凭空捏造
+# FAULT_CATEGORY_MAP: fault_code -> (故障大类, 具体现象)
+FAULT_CATEGORY_MAP = {
+    'CL_001': ('温度异常', '主轴温升过高'),
+    'CL_002': ('电气/报警', '伺服过流报警'),
+    'CL_003': ('精度/质量', '轴类轴向尺寸超差'),
+    'CL_004': ('精度/质量', '车削表面振纹'),
+    'CL_005': ('电气/报警', '刀塔换刀不到位'),
+    'CL_006': ('润滑/磨损', '尾座顶紧力不足'),
+    'CL_007': ('电气/报警', '系统电池电压低'),
+    'MC_001': ('电气/报警', '伺服过流报警'),
+    'MC_002': ('电气/报警', '刀库换刀失败'),
+    'MC_003': ('精度/质量', 'X/Y轴定位偏差'),
+    'MC_004': ('电气/报警', '主轴转速波动'),
+    'MC_005': ('泄漏/堵塞', '冷却液流量不足'),
+    'MC_006': ('电气/报警', '系统电池电压低'),
+    'MC_007': ('泄漏/堵塞', '排屑器卡死'),
+    'ST_001': ('动作/卡滞', '滑块行程不到位'),
+    'ST_002': ('精度/质量', '冲压件毛刺飞边过大'),
+    'ST_003': ('润滑/磨损', '模具刃口崩缺'),
+    'ST_004': ('异响/振动', '离合器制动器异响'),
+    'ST_005': ('精度/质量', '送料步距偏差'),
+    'ST_006': ('电气/报警', '吨位超限报警'),
+    'ST_007': ('电气/报警', '安全光栅误触发'),
+    'ST_008': ('供气/液压', '气源压力不足'),
+    'LC_001': ('光学/放电', '激光功率衰减'),
+    'LC_002': ('光学/放电', '切割头碰撞报警'),
+    'LC_003': ('精度/质量', '焦点位置偏移'),
+    'LC_004': ('泄漏/堵塞', '辅助气体压力不足'),
+    'LC_005': ('精度/质量', '切割面挂渣粗糙'),
+    'LC_006': ('温度异常', '激光器冷却水温度过高'),
+    'LC_007': ('电气/报警', '伺服轴报警'),
+    'BN_001': ('精度/质量', '折弯角度误差大'),
+    'BN_002': ('供气/液压', 'Y轴伺服压力异常'),
+    'BN_003': ('动作/卡滞', '后挡料定位不准'),
+    'BN_004': ('温度异常', '液压油温过高'),
+    'BN_005': ('动作/卡滞', '模具夹紧不到位'),
+    'BN_006': ('动作/卡滞', '折弯滑块不同步'),
+    'BN_007': ('供气/液压', '油泵电机过载'),
+    'WD_001': ('精度/质量', '切割精度超差'),
+    'WD_002': ('电气/报警', '断丝报警'),
+    'WD_003': ('光学/放电', '电极丝张力波动'),
+    'WD_004': ('光学/放电', '加工电流异常'),
+    'WD_005': ('光学/放电', '工作液浓度不足'),
+    'WD_006': ('异响/振动', '导轮异响卡滞'),
+    'WD_007': ('泄漏/堵塞', '工作液循环泵故障'),
+    'MG_001': ('精度/质量', '磨削烧伤表面发蓝'),
+    'MG_002': ('异响/振动', '主轴振动超标'),
+    'MG_003': ('精度/质量', '尺寸精度超差'),
+    'MG_004': ('泄漏/堵塞', '冷却液过滤不良'),
+    'MG_005': ('其他', '砂轮修整异常'),
+    'MG_006': ('动作/卡滞', '进给轴爬行'),
+    'MG_007': ('其他', '砂轮动平衡失效'),
+    'CP_001': ('温度异常', '排气温度过高'),
+    'CP_002': ('供气/液压', '排气量不足压力低'),
+    'CP_003': ('泄漏/堵塞', '油冷却器堵塞'),
+    'CP_004': ('供气/液压', '无法加载/卸载'),
+    'CP_005': ('异响/振动', '主机振动超标'),
+    'CP_006': ('泄漏/堵塞', '自动排水阀堵塞'),
+}
+
+# ROOT_CAUSE_MAP: fault_code -> [(根本原因大类, 具体原因), ...]（按模板原因分析提炼，随机取其一）
+ROOT_CAUSE_MAP = {
+    'CL_001': [('保养缺失', '润滑油/脂未按时更换或加注'), ('保养缺失', '冷却系统未定期清洗导致管路堵塞')],
+    'CL_002': [('保养缺失', '润滑油/脂未按时更换或加注'), ('自然磨损', '触点氧化/烧蚀导致接触不良')],
+    'CL_003': [('自然磨损', '滚珠丝杠副磨损，反向间隙增大'), ('保养缺失', '传感器未定期校准导致读数偏差')],
+    'CL_004': [('操作不当', '参数设置错误（温度/压力/速度等）'), ('保养缺失', '紧固件松动未及时检查拧紧')],
+    'CL_005': [('自然磨损', '定位销/定位件磨损，定位精度下降'), ('保养缺失', '紧固件松动未及时检查拧紧')],
+    'CL_006': [('自然磨损', '密封圈/密封垫老化失效')],
+    'CL_007': [('自然磨损', '自然老化（使用年限超过设计寿命）')],
+    'MC_001': [('操作不当', '超负荷运行，超过设备额定参数'), ('自然磨损', '轴承达到使用寿命，径向间隙超限')],
+    'MC_002': [('保养缺失', '紧固件松动未及时检查拧紧'), ('自然磨损', '定位销/定位件磨损，定位精度下降')],
+    'MC_003': [('自然磨损', '导轨/滑块磨损，运动精度下降'), ('自然磨损', '滚珠丝杠副磨损，反向间隙增大')],
+    'MC_004': [('自然磨损', '皮带/链条拉伸松弛'), ('保养缺失', '传感器未定期校准导致读数偏差')],
+    'MC_005': [('保养缺失', '滤芯/滤网未及时清洗或更换')],
+    'MC_006': [('自然磨损', '自然老化（使用年限超过设计寿命）')],
+    'MC_007': [('保养缺失', '切屑/铁屑未及时清理'), ('自然磨损', '齿轮齿面磨损，啮合间隙增大')],
+    'ST_001': [('自然磨损', '离合器摩擦片磨损，传动打滑'), ('外部环境', '气源压力波动或供气不足')],
+    'ST_002': [('自然磨损', '模具刃口磨损，冲裁间隙变大')],
+    'ST_003': [('零部件质量', '材料疲劳/应力集中导致断裂'), ('操作不当', '来料/板材规格不符')],
+    'ST_004': [('自然磨损', '离合器摩擦片磨损，传动打滑'), ('操作不当', '部件安装/调整不当')],
+    'ST_005': [('保养缺失', '传感器未定期校准导致读数偏差'), ('自然磨损', '导轮/滚轮磨损')],
+    'ST_006': [('操作不当', '来料/板材规格不符'), ('操作不当', '超负荷运行，超过设备额定参数')],
+    'ST_007': [('保养缺失', '传感器未定期校准导致读数偏差'), ('外部环境', '振动传递（邻近设备振动影响）')],
+    'ST_008': [('外部环境', '气源压力波动或供气不足'), ('自然磨损', '密封圈/密封垫老化失效')],
+    'LC_001': [('保养缺失', '镜片/光学件未定期清洁'), ('自然磨损', '镜片/光学件表面损伤')],
+    'LC_002': [('操作不当', '来料/板材规格不符'), ('保养缺失', '传感器未定期校准导致读数偏差')],
+    'LC_003': [('保养缺失', '紧固件松动未及时检查拧紧')],
+    'LC_004': [('外部环境', '气源压力波动或供气不足'), ('自然磨损', '密封圈/密封垫老化失效')],
+    'LC_005': [('操作不当', '参数设置错误（温度/压力/速度等）'), ('保养缺失', '镜片/光学件未定期清洁')],
+    'LC_006': [('保养缺失', '冷却系统未定期清洗导致管路堵塞'), ('外部环境', '冷却水源压力/温度异常')],
+    'LC_007': [('外部环境', '电源电压波动/缺相/谐波干扰'), ('自然磨损', '触点氧化/烧蚀导致接触不良')],
+    'BN_001': [('操作不当', '参数设置错误（温度/压力/速度等）'), ('操作不当', '模具安装调试不当')],
+    'BN_002': [('外部环境', '电源电压波动/缺相/谐波干扰'), ('保养缺失', '滤芯/滤网未及时清洗或更换')],
+    'BN_003': [('自然磨损', '滚珠丝杠副磨损，反向间隙增大'), ('保养缺失', '润滑油/脂未按时更换或加注')],
+    'BN_004': [('保养缺失', '冷却系统未定期清洗导致管路堵塞'), ('操作不当', '参数设置错误（温度/压力/速度等）')],
+    'BN_005': [('自然磨损', '定位销/定位件磨损，定位精度下降'), ('操作不当', '部件安装/调整不当')],
+    'BN_006': [('保养缺失', '传感器未定期校准导致读数偏差'), ('自然磨损', '密封圈/密封垫老化失效')],
+    'BN_007': [('外部环境', '电源电压波动/缺相/谐波干扰'), ('操作不当', '超负荷运行，超过设备额定参数')],
+    'WD_001': [('自然磨损', '导轮/滚轮磨损'), ('保养缺失', '传感器未定期校准导致读数偏差')],
+    'WD_002': [('零部件质量', '切削液/工作液配比不当'), ('操作不当', '参数设置错误（温度/压力/速度等）')],
+    'WD_003': [('自然磨损', '导轮/滚轮磨损'), ('保养缺失', '传感器未定期校准导致读数偏差')],
+    'WD_004': [('操作不当', '参数设置错误（温度/压力/速度等）'), ('自然磨损', '触点氧化/烧蚀导致接触不良')],
+    'WD_005': [('零部件质量', '切削液/工作液配比不当')],
+    'WD_006': [('自然磨损', '导轮/滚轮磨损')],
+    'WD_007': [('保养缺失', '滤芯/滤网未及时清洗或更换'), ('自然磨损', '轴承达到使用寿命，径向间隙超限')],
+    'MG_001': [('操作不当', '参数设置错误（温度/压力/速度等）'), ('保养缺失', '冷却系统未定期清洗导致管路堵塞')],
+    'MG_002': [('自然磨损', '轴承达到使用寿命，径向间隙超限')],
+    'MG_003': [('自然磨损', '滚珠丝杠副磨损，反向间隙增大'), ('保养缺失', '传感器未定期校准导致读数偏差')],
+    'MG_004': [('保养缺失', '滤芯/滤网未及时清洗或更换')],
+    'MG_005': [('操作不当', '参数设置错误（温度/压力/速度等）'), ('操作不当', '部件安装/调整不当')],
+    'MG_006': [('保养缺失', '润滑油/脂未按时更换或加注')],
+    'MG_007': [('操作不当', '部件安装/调整不当')],
+    'CP_001': [('保养缺失', '滤芯/滤网未及时清洗或更换'), ('保养缺失', '冷却系统未定期清洗导致管路堵塞')],
+    'CP_002': [('自然磨损', '密封圈/密封垫老化失效'), ('外部环境', '气源压力波动或供气不足')],
+    'CP_003': [('保养缺失', '冷却系统未定期清洗导致管路堵塞')],
+    'CP_004': [('保养缺失', '润滑油/脂未按时更换或加注'), ('外部环境', '电源电压波动/缺相/谐波干扰')],
+    'CP_005': [('自然磨损', '轴承达到使用寿命，径向间隙超限'), ('外部环境', '振动传递（邻近设备振动影响）')],
+    'CP_006': [('保养缺失', '滤芯/滤网未及时清洗或更换')],
+}
+
+# 临时措施（TEMPORARY_FIX）的后续计划话术池
+FOLLOW_UP_PLANS = [
+    '已临时处理恢复生产，待新备件到货后更换原厂件并复验（预计3天内）',
+    '当前为临时修复，计划列入下次停机保养窗口彻底更换',
+    '临时措施有效，已列入周末停产检修计划，届时彻底处理并试运行验证',
+]
+
+# 备件规格映射（未覆盖的备件用默认值）
 PART_SPECS = {
-    'SKF-BRG-6205轴承': '尺寸25×52×15mm，精度等级P0',
-    'SHC 625润滑脂': '1kg/桶，耐高温200°C',
-    '液压阀密封件组套': '含O型圈6种规格各5个',
-    '液压油过滤器': '过滤精度10μm，流量100L/min',
-    '止逆环组件': '材质SKD11，硬度HRC58-62',
-    '螺杆密封环': 'PTFE材质，耐温300°C',
-    '模温机加热管': '功率9kW，电压380V',
-    '温度传感器PT100': '测温范围-50~200°C，精度A级',
-    '格林柱润滑组件': '含油杯和润滑油管',
-    '空气滤清器滤芯': '过滤精度1μm，尺寸φ200×300mm',
-    'ISO 68液压油': '18L/桶，粘度等级ISO VG 68',
-    '电机散热风扇': '轴流式，φ400mm，380V',
-    '冷却器密封垫': '耐油橡胶，适配GA系列',
-    '冷却器清洗剂': '5L/桶，弱碱性',
-    '油分离器芯': '过滤精度0.1μm',
-    '油泵滤网': '不锈钢，目数100目',
     '主轴轴承7014C': '尺寸70×110×20mm，P4精度',
-    '丝杠轴承组': '含角接触球轴承3件',
-    '导轨润滑脂': '2kg/桶，含极压添加剂',
-    '刀具组件': '含刀柄和锁紧螺母',
+    '主轴润滑脂': '1kg/桶，耐高温200°C',
+    '伺服电机动力线': '含三相动力线+接地，拖链用',
+    '抱闸线圈': 'DC24V，电阻40±5Ω',
+    'X轴丝杠轴承': '角接触球轴承组，P4精度',
+    '机夹刀片': 'CNMG120408，硬质合金',
+    '主轴动平衡块': '标准配重块组',
+    '刀塔定位销': '材质40Cr，淬火HRC45-50',
+    '鼠齿盘': '精密定位齿盘，材质合金钢',
+    '尾座油缸密封包': '含活塞密封+防尘圈',
+    '顶尖': '莫氏5#，合金顶尖',
+    '3.6V锂电池': 'ER6V，数控系统后备电池',
+    '主轴冷却管': '耐油软管，内径8mm',
     '刀库定位销': '材质40Cr，淬火HRC45-50',
-    '系统散热风扇': 'DC24V，60×60×25mm',
-    '滚筒包胶层': '橡胶板，厚度10mm',
-    '托辊轴承6204': '尺寸20×47×14mm，P0精度',
-    '电机散热风扇罩': '钢板焊接，表面喷塑',
-    '输入轴油封': 'TC型，轴径35mm',
-    '输出轴油封': 'TC型，轴径60mm',
-    '齿轮油': '18L/桶，ISO VG 220',
-    'PLC后备电池': '3.6V锂电池，ER14505',
-    '通信电缆': 'PROFIBUS DP线，5m',
-    'PLC电源模块': '输入AC220V，输出DC24V/2A',
-    '保险丝': '2A，5×20mm',
-    'I/O模块': '16点输入/16点输出，DC24V',
+    '刀套弹簧': '弹簧钢，夹持力>15N',
+    '光栅尺读数头': '增量式，0.5μm分辨率',
+    '滚珠丝杠副': '规格3210，C3级',
+    '主轴编码器': '增量式，2500线',
+    '传动皮带': '多楔带，3槽',
+    '冷却泵叶轮': '不锈钢叶轮，适配冷却泵',
+    '冷却液过滤器滤芯': '80目不锈钢滤网',
+    '排屑螺旋叶片': '耐磨合金，外径匹配排屑器',
+    '10A-1链条': '滚子链，10A-1',
+    '离合器摩擦片': '石棉/铜基摩擦片，适配冲床离合器',
+    '冲床气源调压阀': '气动调压阀，DN15',
+    '冲裁模具刃口': 'SKD11，硬度HRC58-62',
+    '送料机辊轮': '合金钢辊轮，表面淬火',
+    '伺服编码器': '17bit绝对值编码器',
+    '吨位传感器': '冲床专用测力传感器',
+    '安全光栅': '对射式，光轴距10mm',
+    '气源过滤器': '三联件过滤器，1/2寸',
+    '气管接头': '快插接头，8mm',
+    '保护镜片': '石英镜片，适配切割头',
+    '聚焦镜': '硒化锌聚焦镜，f=127mm',
+    '切割头高度传感器': '电容式传感器',
+    '调焦机构': '精密丝杠调焦组件',
+    '减压阀': '气体减压阀，0-1.6MPa',
+    '气嘴': '切割气嘴，孔径2.0mm',
+    '切割透镜': '聚焦透镜，适配激光器',
+    '冷水机滤芯': '冷水机循环过滤器',
+    '激光器冷却液': '激光器专用冷却液',
+    '导轨滑块': '直线导轨滑块，适配XY轴',
+    '拖链电缆': '伺服动力+编码器拖链线',
+    '挠度补偿垫片': '精密调整垫片',
+    '伺服阀': '比例伺服阀，适配折弯机',
+    '油缸密封包': '含活塞杆密封+防尘圈',
+    '后挡料丝杠': '滚珠丝杠，规格2005',
+    '后挡料挡指': '折弯后挡料挡指',
+    '冷却器密封垫': '耐油橡胶，适配冷却器',
+    '液压油滤芯': '高压滤芯，10μm',
+    '夹紧爪': '模具夹紧爪，合金钢',
+    '同步阀': '电液比例同步阀',
+    '油泵进油滤网': '不锈钢滤网，100目',
+    '热继电器': '电机热保护继电器',
+    '线切割导轮': '硬质合金导轮，V型槽',
+    '电极丝': '黄铜电极丝，φ0.2mm',
+    '张力轮': '耐磨张力轮组件',
+    '张力传感器': '电极丝张力传感器',
+    '脉冲电源模块': '线切割高频脉冲电源',
+    '导电块': '耐磨导电块，紫铜',
+    '线切割工作液': '水基线切割工作液，浓缩型',
+    '循环滤芯': '线切割工作液滤芯',
+    '导轨润滑油': '2kg/桶，含极压添加剂',
+    '导轮轴承': '微型轴承，P4精度',
+    '砂轮': '白刚玉砂轮，φ300mm',
+    '砂轮法兰': '砂轮法兰盘，含压紧螺母',
+    '砂轮修整金刚笔': '金刚石修整笔，单点',
+    '磁性分离器': '磁辊式切屑分离器',
+    '冷却液滤芯': '磨床冷却液过滤袋',
+    '主轴轴承': '角接触球轴承，P4精度',
+    '油冷却器': '板翅式油冷却器',
+    '空压机油过滤器': '螺杆空压机油滤芯',
+    '进气过滤器滤芯': '空压机进气滤芯',
+    '进气阀维修包': '进气阀阀板+密封维修包',
+    '油气分离器芯': '油气分离器滤芯',
+    '空压机润滑油': '螺杆空压机专用油，20L',
+    '压力传感器': '0-1.6MPa压力传感器',
+    '电磁阀': '气动电磁阀，DC24V',
+    '主机轴承': '螺杆主机轴承组',
+    '减震垫': '橡胶减震垫',
+    '自动排水阀': '电子定时自动排水阀',
 }
 
 SUPPLIERS = {
-    'SKF-BRG-6205轴承': 'SKF中国',
-    'SHC 625润滑脂': '壳牌中国',
-    '液压阀密封件组套': '派克汉尼汾',
-    '液压油过滤器': '颇尔过滤',
-    '止逆环组件': '海天精工',
-    '螺杆密封环': '恩格尔机械',
-    '模温机加热管': '信易电热',
-    '温度传感器PT100': '欧姆龙',
-    '格林柱润滑组件': '海天精工',
-    '空气滤清器滤芯': '阿特拉斯·科普柯',
-    'ISO 68液压油': '壳牌中国',
-    '电机散热风扇': '施乐百',
-    '冷却器密封垫': '阿特拉斯·科普柯',
-    '冷却器清洗剂': '福斯润滑油',
-    '油分离器芯': '阿特拉斯·科普柯',
-    '油泵滤网': '复盛空压机',
     '主轴轴承7014C': 'FAG中国',
-    '丝杠轴承组': 'NSK中国',
-    '导轨润滑脂': '克鲁勃润滑剂',
-    '刀具组件': '山特维克',
-    '刀库定位销': '发那科',
-    '系统散热风扇': '三菱电机',
-    '滚筒包胶层': '华欧输送带',
-    '托辊轴承6204': 'SKF中国',
-    '电机散热风扇罩': '皖南电机',
-    '输入轴油封': 'NOK',
-    '输出轴油封': 'NOK',
-    '齿轮油': '壳牌中国',
-    'PLC后备电池': '松下电器',
-    '通信电缆': '西门子',
-    'PLC电源模块': '西门子',
-    '保险丝': '正泰电器',
-    'I/O模块': '西门子',
+    '主轴润滑脂': '克鲁勃润滑剂',
+    '伺服电机动力线': '发那科',
+    '抱闸线圈': '发那科',
+    'X轴丝杠轴承': 'NSK中国',
+    '机夹刀片': '山特维克',
+    '主轴动平衡块': '大隈机械',
+    '刀塔定位销': '广州数控',
+    '鼠齿盘': '宝鸡机床',
+    '尾座油缸密封包': '派克汉尼汾',
+    '3.6V锂电池': '松下电器',
+    '光栅尺读数头': '海德汉',
+    '滚珠丝杠副': 'THK中国',
+    '主轴编码器': '发那科',
+    '传动皮带': '盖茨传动',
+    '冷却泵叶轮': '格兰富',
+    '冷却液过滤器滤芯': '颇尔过滤',
+    '离合器摩擦片': '协易机械',
+    '冲裁模具刃口': '青岛特殊钢',
+    '吨位传感器': 'HBM中国',
+    '安全光栅': '欧姆龙',
+    '保护镜片': '大族激光',
+    '聚焦镜': '大族激光',
+    '切割头高度传感器': '大族激光',
+    '冷水机滤芯': '大族激光',
+    '导轨滑块': 'THK中国',
+    '拖链电缆': '易格斯',
+    '伺服阀': '力士乐',
+    '油缸密封包': '派克汉尼汾',
+    '后挡料丝杠': 'THK中国',
+    '夹紧爪': '亚威机床',
+    '同步阀': '力士乐',
+    '液压油滤芯': '颇尔过滤',
+    '油冷却器': '阿特拉斯·科普柯',
+    '空压机油过滤器': '阿特拉斯·科普柯',
+    '进气过滤器滤芯': '阿特拉斯·科普柯',
+    '进气阀维修包': '复盛机械',
+    '油气分离器芯': '阿特拉斯·科普柯',
+    '空压机润滑油': '壳牌中国',
+    '压力传感器': '西门子',
+    '电磁阀': 'SMC中国',
+    '主机轴承': 'SKF中国',
+    '自动排水阀': '复盛机械',
+    '线切割导轮': '沙迪克',
+    '电极丝': '沙迪克',
+    '张力传感器': '沙迪克',
+    '脉冲电源模块': '沙迪克',
+    '导电块': '三菱电机',
+    '线切割工作液': '欧特克',
+    '砂轮': '诺顿磨具',
+    '砂轮修整金刚笔': '元素六',
+    '磁性分离器': '广州新力',
 }
 
+# 备件单位：自动按名称关键词推断
 PART_UNITS = {}
-for part_name, spec in PART_SPECS.items():
-    if any(kw in part_name for kw in ['润滑脂', '液压油', '齿轮油', '清洗剂']):
+for part_name in PART_SPECS:
+    if any(kw in part_name for kw in ['润滑脂', '液压油', '齿轮油', '清洗剂', '工作液', '冷却液', '润滑油']):
         PART_UNITS[part_name] = '桶'
-    elif '电缆' in part_name:
+    elif '电缆' in part_name or '电极丝' in part_name or '链条' in part_name:
         PART_UNITS[part_name] = '根'
     else:
         PART_UNITS[part_name] = '个'
 
-TECHNICIANS = [
-    {'username': 'tech_zhang', 'real_name': '张师傅', 'role': 'TECHNICIAN', 'skills': '注塑机,液压系统'},
-    {'username': 'tech_li', 'real_name': '李师傅', 'role': 'TECHNICIAN', 'skills': '数控机床,PLC'},
-    {'username': 'tech_wang', 'real_name': '王师傅', 'role': 'TECHNICIAN', 'skills': '空压机,输送设备'},
-    {'username': 'tech_zhao', 'real_name': '赵师傅', 'role': 'TECHNICIAN', 'skills': '电气系统,自动化'},
-    {'username': 'tech_liu', 'real_name': '刘师傅', 'role': 'TECHNICIAN', 'skills': '机械维修,焊接'},
-    {'username': 'admin', 'real_name': '管理员', 'role': 'ADMIN', 'skills': ''},
-    {'username': 'supervisor_chen', 'real_name': '陈主管', 'role': 'SUPERVISOR', 'skills': ''},
-]
 
+# ==================== 生成逻辑 ====================
 
-def generate_devices(count=500):
-    """生成设备数据"""
+def generate_devices(count=DEVICE_COUNT):
+    """生成设备数据（按占比），monitor_extra.has_log 标记日志能力"""
+    type_counts = {}
+    total = 0
+    for t, w, _cap in DEVICE_TYPES:
+        c = int(count * w)
+        type_counts[t] = c
+        total += c
+    type_counts[DEVICE_TYPES[0][0]] += count - total  # 补齐余数
+
     devices = []
-    type_counts = {t: int(count * w) for t, w in zip(DEVICE_TYPES, TYPE_WEIGHTS)}
-    # 补齐余数
-    diff = count - sum(type_counts.values())
-    type_counts[DEVICE_TYPES[0]] += diff
-
     for dt, dt_count in type_counts.items():
+        # 混合类型：按 HAS_LOG_MIX_RATE 拆分 has_log 列表并打乱
+        cap = dict((t, c) for t, _, c in DEVICE_TYPES)[dt]
+        if cap == 'mix':
+            n_log = int(dt_count * HAS_LOG_MIX_RATE)
+            has_log_list = [True] * n_log + [False] * (dt_count - n_log)
+            random.shuffle(has_log_list)
+        else:
+            has_log_list = [bool(cap)] * dt_count
+
         for i in range(dt_count):
             mfr = random.choice(MANUFACTURERS[dt])
             model_series = random.choice(MODELS[dt])
@@ -411,6 +1054,12 @@ def generate_devices(count=500):
             capacity = random.randint(300, 5000)
             suffix = random.choice(['A', 'B', 'C', 'D', 'E'])
             device_code = f"{prefix}-{capacity}{suffix}"
+
+            # 运行状态：绝大多数在线，少量告警/故障/离线（避免页面全是"未知"）
+            run_status = random.choices(
+                ['ONLINE', 'ALARM', 'FAULT', 'OFFLINE'],
+                weights=[0.86, 0.06, 0.04, 0.04],
+            )[0]
 
             workshop = random.choice(['A', 'B', 'C', 'D'])
             line = random.randint(1, 5)
@@ -433,12 +1082,14 @@ def generate_devices(count=500):
                 purchase_date=pd,
                 warranty_expiry=we,
                 remark=random.choice(REMARKS[dt]),
+                run_status=run_status,
+                monitor_extra={'has_log': has_log_list[i]},
             ))
     return devices
 
 
 def generate_spare_parts():
-    """生成备件数据"""
+    """生成备件数据（从故障模板 used_parts 沉淀）"""
     seen = set()
     parts = []
     for dt, templates in FAULT_TEMPLATES.items():
@@ -455,7 +1106,8 @@ def generate_spare_parts():
                 price_map = {
                     '轴承': 150, '润滑脂': 200, '密封件': 80, '过滤器': 100,
                     '滤芯': 80, '液压油': 300, '传感器': 120, '电缆': 50,
-                    '电源模块': 800, 'I/O模块': 600, '散热风扇': 60,
+                    '电源模块': 800, 'I/O模块': 600, '散热风扇': 60, '镜片': 400,
+                    '导轮': 350, '砂轮': 500, '丝杠': 1200, '模具': 2500,
                 }
                 price = 50
                 for kw, p in price_map.items():
@@ -479,23 +1131,29 @@ def generate_spare_parts():
 
 
 def generate_work_orders(devices, technicians):
-    """生成维修工单"""
-    orders = []
-    statuses = list(WorkOrderStatus)
-    wo_counter = 1
+    """生成维修工单（目标 WO_TARGET 单）
 
-    # 让每台设备有 1-3 个工单
-    for device in devices:
-        num_orders = random.choices([1, 2, 3], weights=[0.5, 0.3, 0.2])[0]
+    日志型设备 + 日志型故障模板 → 填 device_error_code/log_text；否则两字段留空（现象型）。
+    已完成工单补齐故障分类/根本原因分类/维修结果/工时/创建人，与故障模板一一对应。
+    """
+    orders = []
+    wo_counter = 1
+    pool = list(devices)
+    random.shuffle(pool)
+
+    for device in pool:
+        if len(orders) >= WO_TARGET:
+            break
         templates = FAULT_TEMPLATES.get(device.device_type, [])
         if not templates:
             continue
-
-        for _ in range(num_orders):
+        n = random.choices([0, 1, 2], weights=[0.3, 0.5, 0.2])[0]
+        n = min(n, WO_TARGET - len(orders))
+        for _ in range(n):
             tpl = random.choice(templates)
             status = random.choices(
                 [WorkOrderStatus.COMPLETED, WorkOrderStatus.DRAFT, WorkOrderStatus.IN_PROGRESS],
-                weights=[0.7, 0.15, 0.15],
+                weights=[0.8, 0.1, 0.1],
             )[0]
 
             today = datetime.utcnow()
@@ -507,6 +1165,31 @@ def generate_work_orders(devices, technicians):
             technician = random.choice(technicians) if technicians else None
             priority = tpl.get('priority', 'MEDIUM')
 
+            has_log = bool((device.monitor_extra or {}).get('has_log', False))
+            log = tpl.get('log') or {}
+            device_error_code = log.get('error_code') if has_log and log else None
+            log_text = log.get('log_text') if has_log and log else None
+
+            # 故障分类（全部工单都填，与级联分类表一致）
+            fault_cat, fault_phen_type = FAULT_CATEGORY_MAP.get(tpl['fault_code'], ('其他', ''))
+
+            # 已完成工单：根本原因分类 + 维修结果 + 工时（未完成工单这些字段留空才真实）
+            root_cause_cat = root_cause_type = repair_result = follow_up = None
+            work_hours = None
+            if status == WorkOrderStatus.COMPLETED and end:
+                rc_options = ROOT_CAUSE_MAP.get(tpl['fault_code'])
+                if rc_options:
+                    root_cause_cat, root_cause_type = random.choice(rc_options)
+                # 维修结果：绝大多数彻底修复，少量临时措施（附后续计划）
+                repair_result = random.choices(
+                    ['PERMANENT_FIX', 'TEMPORARY_FIX'], weights=[0.88, 0.12]
+                )[0]
+                if repair_result == 'TEMPORARY_FIX':
+                    follow_up = random.choice(FOLLOW_UP_PLANS)
+                # 工时：实际人工耗时 ≤ 维修时间跨度，按 0.5h 取整
+                duration_h = (end - start).total_seconds() / 3600
+                work_hours = max(0.5, round(duration_h * random.uniform(0.55, 0.95) * 2) / 2)
+
             wo_no = f"WO-{created.strftime('%Y%m%d')}-{wo_counter:03d}"
             wo_counter += 1
 
@@ -516,14 +1199,24 @@ def generate_work_orders(devices, technicians):
                 device_code=device.device_code,
                 fault_code=tpl['fault_code'],
                 fault_description=tpl['fault_description'],
+                fault_category=fault_cat,
+                fault_phenomenon_type=fault_phen_type,
                 fault_phenomenon=tpl['fault_phenomenon'],
+                root_cause_category=root_cause_cat,
+                root_cause_type=root_cause_type,
                 root_cause=tpl['root_cause'],
                 solution_steps=tpl['solution_steps'],
                 used_parts=tpl['used_parts'],
+                repair_result=repair_result,
+                follow_up_plan=follow_up,
+                work_hours=work_hours,
+                device_error_code=device_error_code,
+                log_text=log_text,
                 start_time=start,
                 end_time=end,
                 technician_id=technician.id if technician else None,
                 assignee_id=technician.id if technician else None,
+                created_by=technician.id if technician else None,
                 priority=priority,
                 location=device.location,
                 status=status,
@@ -535,23 +1228,23 @@ def generate_work_orders(devices, technicians):
 
 
 def generate_knowledge(work_orders):
-    """从已完成的工单提取知识条目"""
-    from app.models.knowledge import KnowledgeStatus
+    """从已完成工单提取知识条目（按故障码去重，上限 KNOWLEDGE_CAP）"""
     knowledge = []
     seen_faults = set()
 
     for wo in work_orders:
         if wo.status != WorkOrderStatus.COMPLETED:
             continue
-        key = (wo.fault_code, wo.device_code)
-        if key in seen_faults:
+        if wo.fault_code in seen_faults:
             continue
-        seen_faults.add(key)
+        seen_faults.add(wo.fault_code)
 
         tags = wo.tags or []
+        err_prefix = f"错误码：{wo.device_error_code}\n" if wo.device_error_code else ""
         knowledge.append(KnowledgeItem(
             title=f"【{wo.device.device_type}】{wo.fault_description}的处理方法",
             content=(
+                f"{err_prefix}"
                 f"故障现象：{wo.fault_phenomenon}\n"
                 f"原因分析：{wo.root_cause}\n"
                 f"处理步骤：{wo.solution_steps}"
@@ -564,52 +1257,41 @@ def generate_knowledge(work_orders):
             status=KnowledgeStatus.PUBLISHED,
             version=1,
         ))
+        if len(knowledge) >= KNOWLEDGE_CAP:
+            break
     return knowledge
 
 
 def clean_data(db):
-    """清空所有数据（按外键约束逆序）"""
+    """清空业务数据（按外键约束逆序）；**保留用户账号与独立知识库**"""
     print("正在清空已有数据...")
     db.execute(text("DELETE FROM work_orders"))
-    db.execute(text("DELETE FROM knowledge_items"))
+    # 只删工单提取的知识（source_type='WORK_ORDER'），保留 seed_knowledge.py 的独立知识
+    db.execute(text("DELETE FROM knowledge_items WHERE source_type = 'WORK_ORDER'"))
     db.execute(text("DELETE FROM spare_parts"))
     db.execute(text("DELETE FROM devices"))
-    db.execute(text("DELETE FROM users"))
     db.commit()
-    print("  已清空所有数据")
+    print("  已清空业务数据（设备/工单/备件/工单知识），保留用户与独立知识库")
 
 
 def run():
     db = SessionLocal()
     try:
-        # 1. 清空数据
+        # 1. 清空业务数据（保留用户）
         clean_data(db)
 
-        # 2. 创建用户
-        print("创建用户...")
-        users = []
-        for u in TECHNICIANS:
-            user = User(
-                username=u['username'],
-                password_hash='240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9',  # admin123
-                real_name=u['real_name'],
-                role=u['role'],
-                is_active=True,
-                skills=u['skills'],
-            )
-            db.add(user)
-            db.flush()
-            users.append(user)
-        db.commit()
-        print(f"  创建了 {len(users)} 个用户")
+        # 2. 保留现有用户作为维修工池（不做用户重建）
+        users = db.query(User).all()
+        print(f"  保留现有用户 {len(users)} 个")
 
         # 3. 生成设备
         print("生成设备数据...")
-        devices = generate_devices(500)
+        devices = generate_devices(DEVICE_COUNT)
         for d in devices:
             db.add(d)
         db.flush()
-        print(f"  生成了 {len(devices)} 台设备")
+        n_log = sum(1 for d in devices if (d.monitor_extra or {}).get('has_log'))
+        print(f"  生成了 {len(devices)} 台设备（有日志 {n_log}/{len(devices)} = {n_log*100//len(devices)}%）")
 
         # 4. 生成备件
         print("生成备件数据...")
@@ -627,7 +1309,7 @@ def run():
         db.flush()
         print(f"  生成了 {len(orders)} 个工单")
 
-        # 6. 生成知识条目
+        # 6. 生成知识条目（从工单获得）
         print("生成知识条目...")
         knowledge = generate_knowledge(orders)
         for k in knowledge:
@@ -638,7 +1320,7 @@ def run():
         db.commit()
         print(f"\n{'='*50}")
         print(f"✅ 种子数据生成完成！")
-        print(f"   用户: {len(users)}")
+        print(f"   用户(保留): {len(users)}")
         print(f"   设备: {len(devices)}")
         print(f"   备件: {len(parts)}")
         print(f"   工单: {len(orders)}")

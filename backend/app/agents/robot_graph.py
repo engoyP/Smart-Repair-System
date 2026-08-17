@@ -184,7 +184,8 @@ def duty_node(state: RobotState) -> dict:
 
 
 def repair_node(state: RobotState) -> dict:
-    return {"reply": tools.guided_repair_chat(state.get("staff_id") or "", state.get("text") or "")}
+    # 结构化追踪（联通复用追踪模式）：A/B/C 选项逐步排查；对话式 guided_repair_chat 保留给 MCP 工具
+    return {"reply": tools.guided_repair_track(state.get("staff_id") or "", state.get("text") or "")}
 
 
 # ============================================================

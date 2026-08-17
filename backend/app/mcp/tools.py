@@ -9,6 +9,7 @@ import time
 import threading
 import uuid
 import re
+import json
 from datetime import date, datetime, timedelta
 from typing import Optional, Dict, List
 
@@ -133,6 +134,211 @@ def guided_repair_chat(staff_id: str, message: str) -> str:
     except Exception as e:
         logger.warning(f"[MCP] 追踪维修对话失败: {e}")
         return "追踪维修暂时不可用，请稍后再试或直接联系资深工程师。"
+
+
+# ============================================================
+# 1.2 追踪维修（结构化）：钉钉问答联通复用追踪模式
+# 复用 guided_repair_agent.start_diagnosis / next_step 的 A/B/C 选项逐步排查，
+# 解析用户操作反馈（选X + 动作 + 状态）续接 next_step；解析失败重发格式指引，不新开会话。
+# ============================================================
+_ACTION_FEEDBACK_RE = re.compile(r"选(?:了)?\s*([A-Ca-c0-9一二三①-⑨])")
+_ACTION_LEADING_RE = re.compile(r"^([A-Ca-c0-9一二三①-⑨])\s*[\s,，。、:：]")
+_OPTION_ALIAS = {
+    "1": "A", "2": "B", "3": "C",
+    "一": "A", "二": "B", "三": "C",
+    "①": "A", "②": "B", "③": "C",
+    "a": "A", "b": "B", "c": "C",
+}
+_STATUS_CONNECTOR_RE = re.compile(r"(?:结果|现在|目前|然后|之后|发现|试机|现在设备|设备状态)")
+# 已解决 / 未解决判定：未解决词优先，避免"还不行/不可以"误命中"行/可以"造成反向判断
+_UNSOLVED_KW = ("不行", "不可以", "没反应", "没变化", "没解决", "没恢复", "没效果", "没用", "无效", "还异常", "仍异常", "依旧")
+_SOLVED_KW = ("解决", "正常", "恢复", "好了", "可以", "完成", "ok", "没问题", "修复")
+_NEW_FAULT_HINTS = ("新问题", "重新开始", "另一个故障", "换个故障", "另外的故障", "别的故障")
+
+_parser_llm = None
+
+
+def _get_parser_llm():
+    """懒加载反馈解析 LLM（非流式、低温度、短超时，失败不阻塞）"""
+    global _parser_llm
+    if _parser_llm is None:
+        from langchain_openai import ChatOpenAI
+        from app.core.config import settings
+        _parser_llm = ChatOpenAI(
+            api_key=settings.DEEPSEEK_API_KEY,
+            base_url=settings.DEEPSEEK_BASE_URL,
+            model=settings.DEEPSEEK_MODEL,
+            temperature=0,
+            timeout=15,
+            max_retries=1,
+        )
+    return _parser_llm
+
+
+def _map_option(raw: str, current_options: List[Dict]) -> str:
+    """把用户写的选项（A/B/C 或 ①②③/123/一二三）映射为选项 id；无法映射返回空串"""
+    key = raw.strip().lower()
+    if key in _OPTION_ALIAS:
+        return _OPTION_ALIAS[key]
+    if current_options:
+        try:
+            idx = ["a", "b", "c"].index(key)
+            return current_options[idx]["id"]
+        except (ValueError, IndexError, KeyError):
+            pass
+    return key.upper() if len(key) == 1 else ""
+
+
+def _split_action_status(rest: str) -> tuple:
+    """把反馈剩余文本切成（动作, 设备状态）：按状态连接词切分；无连接词则按解决词判定，整体作动作"""
+    m = _STATUS_CONNECTOR_RE.search(rest)
+    if m:
+        action = rest[:m.start()].strip() or "已执行该选项"
+        status = rest[m.start():].strip() or "已执行"
+        return action, status
+    if any(kw in rest for kw in _UNSOLVED_KW):
+        return rest or "已执行该选项", "仍异常"
+    if any(kw in rest for kw in _SOLVED_KW):
+        return rest or "已执行该选项", "恢复正常"
+    return rest or "已执行该选项", "已执行"
+
+
+def _llm_parse_feedback(message: str, current_options: List[Dict]) -> Optional[Dict]:
+    """LLM 兜底解析反馈三字段：仅当正则快路取不到选项时调用"""
+    try:
+        from langchain_core.messages import HumanMessage, SystemMessage
+        opts_text = "、".join(f"{o.get('id', '')}({o.get('cause', '')})" for o in current_options) or "未知"
+        sys = ("你是设备维修排查的反馈解析器。用户回复了排查操作反馈，抽取三个字段并只输出 JSON：\n"
+               '{"selected_option": "A", "action_taken": "执行的操作", "device_status": "执行后设备状态"}')
+        usr = (f"当前排查选项：{opts_text}\n用户消息：{message}\n"
+               "规则：selected_option 从当前选项里选最接近的 id，找不到就返回空串；"
+               "action_taken / device_status 尽量用消息原文。")
+        resp = _get_parser_llm().invoke([SystemMessage(content=sys), HumanMessage(content=usr)])
+        text = resp.content.strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        data = json.loads(text)
+        if isinstance(data, dict) and data.get("action_taken"):
+            return {
+                "selected_option": data.get("selected_option") or "",
+                "action_taken": str(data.get("action_taken", "")),
+                "device_status": str(data.get("device_status", "")),
+            }
+    except Exception as e:
+        logger.warning(f"[MCP] 反馈 LLM 解析失败: {e}")
+    return None
+
+
+def _parse_action_feedback(message: str, current_options: List[Dict]) -> Optional[Dict]:
+    """从用户自由文本解析追踪反馈（selected_option / action_taken / device_status）
+
+    正则快路：取「选X」或句首选项字母 → 切分动作/状态；取不到选项才走 LLM 兜底。
+    返回 None 表示无法解析（上层重发格式指引，不新开会话）。
+    """
+    text = (message or "").strip()
+    if not text:
+        return None
+    opt, rest = "", text
+    m = _ACTION_FEEDBACK_RE.search(text)
+    if m:
+        opt = _map_option(m.group(1), current_options)
+        rest = text[m.end():].strip()
+    else:
+        m2 = _ACTION_LEADING_RE.match(text)
+        if m2:
+            opt = _map_option(m2.group(1), current_options)
+            rest = text[m2.end():].strip()
+    if opt:
+        action, status = _split_action_status(rest)
+        return {"selected_option": opt, "action_taken": action, "device_status": status}
+    return _llm_parse_feedback(text, current_options)
+
+
+def _render_guided_step_text(step) -> str:
+    """把 GuidedRepairStep 渲染为钉钉 markdown 文本（A/B/C 选项 + 回复指引）"""
+    if step.status == "completed":
+        parts = [f"**排查结束 · 第 {step.step} 步**"]
+        if step.message:
+            parts.append("")
+            parts.append(step.message)
+        if step.summary:
+            parts.append("")
+            parts.append(step.summary)
+        return "\n".join(parts)
+    parts = [f"**第 {step.step} 步 · 排查方向**"]
+    if step.message:
+        parts.append("")
+        parts.append(step.message)
+    if step.options:
+        parts.append("")
+        parts.append("【下一步选项】")
+        for o in step.options:
+            parts.append(f"**{o.id}** {o.cause}")
+            if o.diagnostic_action:
+                parts.append(f"　→ {o.diagnostic_action}")
+        parts.append("")
+        parts.append("请按格式回复：**选选项 + 执行的操作 + 执行后设备状态**")
+        parts.append("例如：选A 测量了电机电压 恢复正常")
+        parts.append("排查另一个故障，回复「新问题」")
+    return "\n".join(parts)
+
+
+def guided_repair_track(staff_id: str, message: str) -> str:
+    """追踪维修（结构化）：钉钉问答联通复用追踪模式
+
+    每 staff 维护一个结构化会话：
+    - 无会话 / 已结束 / 会话过期 → start_diagnosis 开新会话，给 A/B/C 选项
+    - 进行中 → 解析操作反馈走 next_step；解析失败重发格式指引；显式「新问题」开新会话
+    """
+    if not message or not message.strip():
+        return "请输入故障现象，例如：注塑机温度过高、空压机不启动。"
+    if not staff_id:
+        return "缺少用户标识（钉钉企业 userId），无法维护排查会话。"
+    from app.agents.guided_repair_agent import guided_repair_agent
+    from app.core.cache_service import cache_service
+
+    now = time.time()
+    try:
+        session_id = cache_service.get(f"{_GUIDED_SESSION_KEY_PREFIX}{staff_id}")
+        last = cache_service.get(f"{_GUIDED_LAST_KEY_PREFIX}{staff_id}") or 0.0
+    except Exception as e:
+        logger.warning(f"[MCP] 会话映射读取失败: {e}")
+        session_id, last = None, 0.0
+
+    # ---- 进行中的结构化会话：续接 / 重发指引 / 显式新问题 ----
+    if session_id and (now - float(last)) <= GUIDED_SESSION_TTL:
+        status, is_structured = guided_repair_agent.get_session_status(session_id)
+        if status == "diagnosing" and is_structured:
+            if any(h in message for h in _NEW_FAULT_HINTS):
+                session_id = None  # 显式新问题 → 走下方开新会话
+            else:
+                current_options = guided_repair_agent.get_current_options(session_id)
+                feedback = _parse_action_feedback(message, current_options)
+                if feedback:
+                    try:
+                        step = guided_repair_agent.next_step(
+                            session_id,
+                            selected_option=feedback["selected_option"],
+                            action_taken=feedback["action_taken"],
+                            device_status=feedback["device_status"],
+                        )
+                    except Exception as e:
+                        logger.error(f"[MCP] 追踪下一步失败: {e}")
+                        return "步骤生成失败，请稍后再试或回复「新问题」重新开始排查。"
+                    cache_service.set(f"{_GUIDED_LAST_KEY_PREFIX}{staff_id}", now, ttl=GUIDED_SESSION_TTL)
+                    return _render_guided_step_text(step)
+                return ("这条消息我没能识别为排查反馈。请按格式回复：**选选项 + 执行的操作 + 执行后设备状态**\n"
+                        "例如：选A 测量了电机电压 恢复正常\n"
+                        "排查另一个故障，回复「新问题」重新开始。")
+
+    # ---- 新会话 / 已结束 / 会话过期 → 开新结构化诊断 ----
+    with _GUIDED_LOCK:
+        step = guided_repair_agent.start_diagnosis(message, device_type="")
+        new_sid = step.session_id
+        if new_sid:
+            cache_service.set(f"{_GUIDED_SESSION_KEY_PREFIX}{staff_id}", new_sid, ttl=GUIDED_SESSION_TTL)
+        cache_service.set(f"{_GUIDED_LAST_KEY_PREFIX}{staff_id}", now, ttl=GUIDED_SESSION_TTL)
+    return _render_guided_step_text(step)
 
 
 # ============================================================

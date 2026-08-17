@@ -901,15 +901,18 @@ const knowledgeDialog = reactive({ visible: false, keyword: '', results: [], sea
 const faultCodeDialog = reactive({ visible: false, description: '', creating: false, result: null })
 
 const selectedDevice = computed(() => {
-  if (!form.value?.device_id) return null
-  const d = devices.value.find(d => d.id === form.value.device_id)
+  // form 是 reactive 对象（无 .value），直接用 form.device_id
+  if (!form.device_id) return null
+  const d = devices.value.find(d => d.id === form.device_id)
   if (d) return d
   // 备选：deviceFiltered（远程检索可能引入 devices.value 之外的新数据）
-  return deviceFiltered.value.find(d => d.id === form.value.device_id) || null
+  return deviceFiltered.value.find(d => d.id === form.device_id) || null
 })
 const deviceName = computed(() => {
-  if (!form.value?.device_id) return '-'
-  return selectedDevice.value ? selectedDevice.value.device_name : '-'
+  if (!form.device_id) return '-'
+  if (selectedDevice.value) return selectedDevice.value.device_name
+  // 兜底：设备不在本地列表时，用后端详情接口返回的设备名称
+  return form.device_name || form.device_code || '-'
 })
 const devStatusLabel = (s) => ({ ONLINE: '正常', OFFLINE: '离线', ALARM: '告警', FAULT: '故障', UNKNOWN: '未知' }[s] || '未知')
 const devStatusTagType = (s) => ({ ONLINE: 'success', OFFLINE: 'info', ALARM: 'warning', FAULT: 'danger' }[s] || 'info')

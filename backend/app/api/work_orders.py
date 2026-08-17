@@ -82,6 +82,8 @@ def list_work_orders(
         d = _wo_to_dict(w)
         d['created_by_employee_id'] = user_emp_map.get(w.created_by) if w.created_by else None
         d['technician_name'] = user_name_map.get(w.technician_id) if w.technician_id else None
+        d['device_type'] = w.device.device_type if w.device else None
+        d['device_name'] = w.device.device_name if w.device else None
         result_items.append(d)
     return {"total": total, "items": result_items, "page": page, "page_size": page_size}
 
@@ -226,6 +228,10 @@ def get_work_order(work_order_id: int, db: Session = Depends(get_db)):
     if not work_order:
         raise HTTPException(status_code=404, detail="工单不存在")
     resp = WorkOrderResponse.model_validate(work_order)
+    # 设备信息（设备类型/名称）直接从关联设备返回，前端不依赖本地设备列表拼接
+    if work_order.device:
+        resp.device_type = work_order.device.device_type
+        resp.device_name = work_order.device.device_name
     if work_order.created_by:
         creator = db.query(User).filter(User.id == work_order.created_by).first()
         resp.created_by_employee_id = creator.employee_id if creator else None

@@ -23,8 +23,8 @@ const router = createRouter({
           children: [
             { path: 'list', name: 'KnowledgeList', component: () => import('../views/Knowledge.vue'), meta: { title: '知识列表', knowledgeTab: 'list' } },
             { path: 'manuals', name: 'KnowledgeManuals', component: () => import('../views/ManualCodes.vue'), meta: { title: '设备手册', knowledgeTab: 'manuals' } },
-            { path: 'new', name: 'KnowledgeCreate', component: () => import('../views/KnowledgeForm.vue'), meta: { title: '新增知识' } },
-            { path: ':id', name: 'KnowledgeForm', component: () => import('../views/KnowledgeForm.vue'), meta: { title: '知识详情' } },
+            { path: 'new', name: 'KnowledgeCreate', component: () => import('../views/KnowledgeForm.vue'), meta: { title: '新增知识', knowledgeTab: 'list' } },
+            { path: ':id', name: 'KnowledgeForm', component: () => import('../views/KnowledgeForm.vue'), meta: { title: '知识详情', knowledgeTab: 'list' } },
           ],
         },
         { path: 'spare-parts', name: 'SpareParts', component: () => import('../views/SpareParts.vue'), meta: { title: '库存管理' } },

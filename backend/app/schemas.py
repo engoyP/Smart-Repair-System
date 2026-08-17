@@ -139,6 +139,8 @@ class WorkOrderResponse(BaseModel):
     work_order_no: str
     device_id: Optional[int]
     device_code: Optional[str] = None
+    device_type: Optional[str] = None
+    device_name: Optional[str] = None
     fault_code: Optional[str]
     device_error_code: Optional[str] = None
     fault_description: str

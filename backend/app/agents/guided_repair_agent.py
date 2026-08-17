@@ -151,6 +151,29 @@ class GuidedRepairAgent:
         except Exception as e:
             logger.warning(f"[GuidedRepair] 会话保存失败: {e}")
 
+    def get_session_status(self, session_id: str) -> tuple:
+        """供外部（钉钉接入层）只读判断会话如何续接
+
+        Returns:
+            (status, is_structured): status ∈ {"", "diagnosing", "completed"}；
+            is_structured=True 表示该会话由 start_diagnosis 创建（含结构化 history/选项），
+            可直接走 next_step 续接；非结构化会话（对话式 chat 创建）交由上层另作处理。
+        """
+        session = self._load_session(session_id)
+        if not session:
+            return "", False
+        return session.get("status", ""), isinstance(session.get("history"), list)
+
+    def get_current_options(self, session_id: str) -> List[Dict]:
+        """读取当前待反馈步骤的选项（历史最后一条 ai_options），供钉钉接入层解析反馈/重发指引"""
+        session = self._load_session(session_id)
+        if not session:
+            return []
+        history = session.get("history") or []
+        if not history:
+            return []
+        return list(history[-1].get("ai_options") or [])
+
     def _maybe_compress_history(self, session: Dict):
         """对话历史过长时用 LLM 增量压缩最旧部分，避免 30 步上限下历史无限膨胀
 
