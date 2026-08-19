@@ -3,6 +3,7 @@
 .env.local
 .env.*
 !.env.example
+backend/.env copy
 
 # ===== Python =====
 __pycache__/
