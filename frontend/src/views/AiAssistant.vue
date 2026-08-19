@@ -240,9 +240,9 @@
                     <!-- 性能指标 -->
                     <div v-if="msg.meta" class="msg-meta">
                       <span v-if="msg.meta.sourcesCount" class="meta-tag">案例 {{ msg.meta.sourcesCount }}</span>
-                      <span v-if="msg.meta.retrievalTime" class="meta-tag">检索 {{ msg.meta.retrievalTime }}ms</span>
-                      <span v-if="msg.meta.answerTime" class="meta-tag">生成 {{ msg.meta.answerTime }}ms</span>
-                      <span class="meta-time">总计 {{ msg.meta.totalTime }}ms</span>
+                      <span v-if="msg.meta.retrievalTime" class="meta-tag">检索 {{ (msg.meta.retrievalTime / 1000).toFixed(1) }}s</span>
+                      <span v-if="msg.meta.answerTime" class="meta-tag">生成 {{ (msg.meta.answerTime / 1000).toFixed(1) }}s</span>
+                      <span class="meta-time">总计 {{ (msg.meta.totalTime / 1000).toFixed(1) }}s</span>
                     </div>
                   </template>
                 </div>
@@ -375,7 +375,6 @@ const sourceDialog = reactive({ visible: false, item: null })
 
 // ===== 追踪模式 =====
 const repairMode = ref('qa')
-const guidedSessionId = ref('')  // 后端追踪会话 ID
 
 // ===== 三种模式介绍（维修人员视角） =====
 const modeIntroCards = [
@@ -433,6 +432,7 @@ const saveSessions = () => {
       unread: false,
       type: s.type || 'qa',
       _expertSessionId: s._expertSessionId || '',   // 专家模式多轮会话 ID（随会话持久化）
+      _guidedSessionId: s._guidedSessionId || '',   // 追踪模式引导会话 ID（随会话持久化），刷新后可接续多轮引导
       messages: s.messages.map(m => {
         if (m.role === 'assistant') {
           return {
@@ -486,6 +486,8 @@ const loadSessions = () => {
     const last = data[0]
     activeSessionId.value = last.id
     currentSession.value = last
+    // 同步恢复模式：刷新后不能停在默认'qa'，否则追踪/专家会话会"对话不绑定"（消息仍发到问答流）
+    repairMode.value = last.type || 'qa'
     // 恢复 sessionIdCounter
     const maxId = data.reduce((max, s) => {
       const n = parseInt(s.id.replace('session_', ''), 10)
@@ -508,8 +510,8 @@ onMounted(() => {
 const switchMode = (mode) => {
   if (repairMode.value === mode) return
   repairMode.value = mode
-  guidedSessionId.value = ''
   if (currentSession.value) currentSession.value._expertSessionId = ''
+  if (currentSession.value) currentSession.value._guidedSessionId = ''
   if (mode === 'guided') {
     startNewGuidedChat()
   } else if (mode === 'expert') {
@@ -631,7 +633,7 @@ const switchSession = async (s) => {
   currentSession.value = s
   s.unread = false
   repairMode.value = s.type || 'qa'
-  guidedSessionId.value = ''
+  s._guidedSessionId = ''   // 切换会话：追踪引导不接续旧会话，重新开始
   s._expertSessionId = ''
   await scrollToBottom()
 }
@@ -658,6 +660,7 @@ const startNewGuidedChat = () => {
     _createdAt: now,
     unread: false,
     type: 'guided',
+    _guidedSessionId: '',
     messages: [],
   }
   sessions.value.unshift(session)
@@ -830,7 +833,7 @@ const handleSend = async () => {
           ? '/api/v1/search/answer/expert'
           : '/api/v1/search/answer/stream'
     const body = isGuided
-      ? JSON.stringify({ message: text, session_id: guidedSessionId.value || undefined })
+      ? JSON.stringify({ message: text, session_id: session._guidedSessionId || undefined })
       : isExpertStep
         ? JSON.stringify({ session_id: session._expertSessionId, message: text })
         : JSON.stringify({ question: text, top_k: 8 })
@@ -912,7 +915,7 @@ const handleSend = async () => {
               aiMsg._thinking = false
               aiMsg._loading = false
               if (isGuided) {
-                guidedSessionId.value = data.session_id || ''
+                session._guidedSessionId = data.session_id || ''
               } else {
                 if (data.session_id) {
                   // 专家模式首轮：记录会话 ID，后续轮走 /answer/expert/step

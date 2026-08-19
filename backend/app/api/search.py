@@ -29,6 +29,18 @@ from app.agents.expert_repair_agent import expert_repair_agent, ExpertOption, Ex
 router = APIRouter()
 
 
+def _effective_score(item: dict) -> float:
+    """统一有效分：Reranker精排分 > 向量分 > RRF名次分
+    修复：BM25/手册路命中 score 可能为0但 rerank_score 很高，展示/排序/过滤都应取重排后的值"""
+    rs = item.get("rerank_score")
+    if rs is not None:
+        return float(rs)
+    vs = item.get("score", 0)
+    if vs and vs > 0:
+        return float(vs)
+    return float(item.get("rrf_score", 0) or 0)
+
+
 # ==================== 请求/响应模型 ====================
 # Pydantic 数据模型（数据契约）：只定义接口的数据结构，不执行任何逻辑。
 # FastAPI 用它自动完成：①校验请求 ②JSON↔Python对象转换 ③生成 Swagger 文档。
@@ -120,7 +132,7 @@ def quick_search(
                 "device_type": item.get("device_type", ""),
                 "fault_code": item.get("fault_code", ""),
                 "fault_tags": item.get("fault_tags", []),
-                "score": round(item.get("score", 0), 4),
+                "score": round(_effective_score(item), 4),
             })
         return {"query": q, "total": len(results), "results": results}
     except Exception as e:
@@ -171,7 +183,7 @@ def hybrid_search(
             device_type=item.get("device_type", ""),
             fault_code=item.get("fault_code", ""),
             fault_tags=item.get("fault_tags", []) if isinstance(item.get("fault_tags"), list) else [],
-            score=round(item.get("score", item.get("rrf_score", 0)), 4),
+            score=round(_effective_score(item), 4),
             source="hybrid",
         ))
 
@@ -218,7 +230,7 @@ def agent_search(
                 device_type=item.get("device_type", ""),
                 fault_code=item.get("fault_code", ""),
                 fault_tags=item.get("fault_tags", []) if isinstance(item.get("fault_tags"), list) else [],
-                score=round(item.get("score", item.get("rrf_score", 0)), 4),
+                score=round(_effective_score(item), 4),
                 source=result.strategies_used[0] if result.strategies_used else "agent",
             ))
 
@@ -684,7 +696,7 @@ def _to_reference(ref: dict, fault: str = "") -> dict:
         "content": (ref.get("content", "") or "")[:200],
         "device_type": ref.get("device_type", ""),
         "fault_code": ref.get("fault_code", ""),
-        "score": ref.get("score", 0),
+        "score": round(_effective_score(ref), 4),
         "summary": ref.get("summary", ""),
     }
     # 手册条目出处：错误码 + 手册名 + 章节 + 页码（前端展示/回溯用）

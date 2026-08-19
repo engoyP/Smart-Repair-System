@@ -26,6 +26,15 @@ import time
 from contextlib import asynccontextmanager
 from typing import List, Optional
 
+# ===== OMP/OpenMP 运行时稳定性修复 =====
+# 环境存在多个 OMP 运行时（torch-cu124 自带 libiomp5md + FlagEmbedding/oneDNN 的 KMP/OMP），
+# CPU 多线程初始化时触发原生段错误崩溃（exit 0xC0000005）。固定单线程 + 允许重复库，规避冲突。
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("HUGGINGFACE_HUB_CACHE", "")
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 import numpy as np
 from fastapi import FastAPI, HTTPException
 from loguru import logger
@@ -89,6 +98,7 @@ def _load_embedding_model():
         model_path = _resolve_model_path(_EMBEDDING_LOCAL_CANDIDATES, settings.EMBEDDING_MODEL_NAME)
 
         try:
+            import pyarrow  # noqa: F401  预加载：规避 numpy2.x 与 datasets/pyarrow 在 FlagEmbedding 深路径的动态加载 ABI 冲突（访问冲突 0xC0000005）
             from FlagEmbedding import BGEM3FlagModel
         except ImportError:
             _embed_load_error = "FlagEmbedding 未安装，请先 pip install -r requirements.txt"
@@ -232,9 +242,24 @@ class RerankRequest(BaseModel):
 async def lifespan(app: FastAPI):
     global _started_at
     _started_at = time.time()
-    # 非阻塞：后台线程加载双模型，进程立即接受连接，/health 如实报告 loading/ready
-    logger.info("🚀 推理服务启动中，后台线程预加载模型（纯 CPU 约 2-5 分钟），/health 可立即查询...")
-    threading.Thread(target=_background_load, name="model-loader", daemon=True).start()
+    # 主线程同步加载双模型（在真正的启动事件里阻塞直至就绪）。
+    # 注意：不能用后台 daemon 线程在这里 import/初始化 FlagEmbedding 等原生库——
+    # 环境 OMP 多运行时在"非主线程 + 后台线程池"上下文初始化会原生段错误（0xC0000005），
+    # 主线程同步加载经验证稳定。
+    logger.info("🚀 推理服务启动，主线程同步加载（bge-m3 + Qwen3-Reranker，纯 CPU 单线程，耗时较长）...")
+    try:
+        _load_embedding_model()
+        logger.info("✅ bge-m3 加载完成")
+    except Exception as e:
+        _embed_load_error = str(e)
+        logger.error(f"⚠️ bge-m3 加载失败: {e}  {type(e).__name__}")
+    try:
+        _load_reranker()
+        logger.info("✅ Qwen3-Reranker 加载完成")
+    except Exception as e:
+        _rerank_load_error = str(e)
+        logger.error(f"⚠️ Qwen3-Reranker 加载失败: {e}  {type(e).__name__}")
+    logger.info(f"推理服务就绪，总耗时 {time.time()-_started_at:.1f}s")
     yield
     logger.info("👋 推理服务关闭中...")
 

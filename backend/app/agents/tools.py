@@ -435,8 +435,20 @@ def weighted_rerank(
         device_match = any(kw in device_type for kw in device_kw) if device_kw else True
 
         original_score = item.get("score", 0)
-        if original_score <= 0:
+        # 错误码权威精确命中（manual_code_exact）：本身就是最强相关性（用户给出/日志抠出精确错误码，
+        # 手册按 error_code 精确查得），属于金融级"确定命中"，不应再按 故障关键词命中率/设备词 惩罚。
+        # 否则英文日志场景下 fault_hit_count≈0 会把 1.0 压到 0.15 地板，导致权威命中被判"低分/未检索到"。
+        if item.get("method") == "manual_code_exact":
+            # 权威命中分数 = 原向量/精排分；向量路不可用（降级）时用 RRF 分冲高，保证能过回答层阈值
+            exact_score = original_score if original_score > 0 else float(item.get("rrf_score", 0) or 0)
+            item["score"] = round(max(exact_score, 0.8), 4)
+            item["fault_hits"] = 1
             continue
+
+        # 基线分：优先向量分，缺失时用 RRF 名次分（纯 BM25/降级路径）——否则纯 BM25 命中永远 0 分
+        if original_score <= 0:
+            rrf = float(item.get("rrf_score", 0) or 0)
+            original_score = rrf if rrf > 0 else 0.05
 
         if not device_match:
             # 设备类型不匹配 → 故障命中再多也不可信
@@ -468,7 +480,9 @@ _RRF_ALERTED_METHODS: set = set()
 # 错误码形态：SV0436 / ALM-6401 / E3091 / R0910 / PS0002 / EX1006
 # 边界守卫：前后不能是字母/数字/斜杠（防 "S/N 20260015" 抠出 N202600、防长数字串截头），
 # 数字部分后不能紧跟数字（防 8 位序列号截取前 6 位）
-_ERROR_CODE_RE = re.compile(r'(?<![A-Za-z0-9/])[A-Za-z]{1,6}[-\s]?\d{2,6}(?!\d)')
+# 分隔符只接受连字符/下划线，绝不含空格：避免 "Start cycle 2026" 被抠成 CYCLE2026、
+# "axis halted 2026" 被抠成 HALTED2026 这类"非法语+年份"误判
+_ERROR_CODE_RE = re.compile(r'(?<![A-Za-z0-9/])[A-Za-z]{1,6}[-_]?\d{2,6}(?!\d)')
 _NUMERIC_TOKEN_RE = re.compile(r'(?<!\d)\d{4,6}(?!\d)')
 
 # 纯数字错误码白名单缓存（码表 = manual_code_entries.error_code distinct）
@@ -597,15 +611,19 @@ def rrf_merge(
             rrf_score = 1.0 / (k + rank)
             if item_id not in scores:
                 scores[item_id] = {
-                    "rrf": 0.0, 
-                    "vector_score": 0.0, 
+                    "rrf": 0.0,
+                    "vector_score": 0.0,
+                    "bm25_score": 0.0,
                     "item": item
                     }
             scores[item_id]["rrf"] += rrf_score
 
-            # 记录语义检索/精确匹配的相似度作为显示分数
-            # （BM25 关键词匹配无法衡量语义相关性，不计入 → BM25 独中条目得 0 分）
-            if item.get("method") != "bm25_search":
+            # 记录各路最高分（vector vs bm25 分别保存，供下游兜底算分）
+            if item.get("method") == "bm25_search":
+                bm25 = item.get("score", 0)
+                if bm25 > scores[item_id]["bm25_score"]:
+                    scores[item_id]["bm25_score"] = bm25
+            else:
                 item_sim = item.get("score", 0)
                 if item_sim > scores[item_id]["vector_score"]:
                     scores[item_id]["vector_score"] = item_sim
@@ -616,15 +634,28 @@ def rrf_merge(
 
     # 按 RRF 得分降序排列
     merged = sorted(scores.values(), key=lambda x: x["rrf"], reverse=True)
+    # 归一化 BM25 原始分（0~1）：BM25路本身是绝对分（如69/37），无法与向量分(0~1)同口径
+    bm25_max = max((e["bm25_score"] for e in merged), default=0.0)
     result = []
     for entry in merged[:top_n]:
         item = entry["item"].copy()
         item["rrf_score"] = round(entry["rrf"], 4)
-        # 仅使用向量相似度作为展示得分，BM25 独中的条目得分为 0
-        # （BM25 关键词匹配无法衡量语义相关性，显示 0% 避免误导）
-        display_score = entry["vector_score"]
+        # 展示得分：优先向量语义分；纯BM25命中时写入归一化后的BM25分（0~1），避免0%误导
+        if entry["vector_score"] > 0:
+            display_score = entry["vector_score"]
+        elif bm25_max > 0 and entry["bm25_score"] > 0:
+            # 以本次结果集最高 BM25 分为分母做线性归一，保证头部分数接近 0.9~0.95（语义高相关顶部形态）
+            raw = entry["bm25_score"] / bm25_max
+            # 再拉宽到 0.35~0.97：让最高的≈97%，最低的≈35%，符合用户对"相关/不相关"的预期
+            display_score = 0.35 + 0.62 * raw
+        else:
+            display_score = 0.0
         item["score"] = round(display_score, 4)
-        item["rrf_only"] = display_score <= 0  # 标记：仅 RRF 排序带来，无语义匹配
+        item["bm25_norm_score"] = round(
+            (0.35 + 0.62 * (entry["bm25_score"] / bm25_max)) if (bm25_max > 0 and entry["bm25_score"] > 0) else 0.0,
+            4,
+        )
+        item["rrf_only"] = entry["vector_score"] <= 0  # 标记：无向量语义命中，由 BM25/RRF 带来
         result.append(item)
 
     # 防范措施②：防御性去重——兜底确保返回结果不存在重复 knowledge_id。

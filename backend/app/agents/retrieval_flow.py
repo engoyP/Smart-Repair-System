@@ -215,11 +215,21 @@ def filter_rerank_cases(
     bm25_only_degraded = bool(merged) and all(m.get("rrf_only", False) for m in merged)
 
     if bm25_only_degraded:
-        # 推理服务不可用：纯 BM25 降级，按 RRF 名次排序
+        # 推理服务不可用：纯 BM25 降级，按 RRF 名次排序 → 过 weighted_rerank 修正分（避免 score=0 展示 0%）
         filtered = sorted(merged, key=lambda x: x.get("rrf_score", 0), reverse=True)
+        filtered = _rerank_or_fallback(tools, filtered, query)
         logger.warning("[RetrievalFlow] BM25-only 降级模式：跳过向量分数阈值，按 RRF 名次排序")
     else:
-        filtered = [m for m in merged if not m.get("rrf_only", False) and m.get("score", 0) >= settings.RETRIEVAL_COARSE_THRESHOLD]
+        # 粗筛：向量路以 score>=阈值 放行；BM25/手册路无向量分但 rrf_only 者也放行进精排，
+        # 末段再按 _sort_key 统一阈值收口——避免 BM25 命中正确案例被 0 分向量粗筛误杀
+        pre = [
+            m for m in merged
+            if m.get("rrf_only", False) or m.get("score", 0) >= settings.RETRIEVAL_COARSE_THRESHOLD
+        ]
+        # 非降级模式下 rrf_only 只是"向量路这条没召回"（不是全不可用），控制数量防污染头部
+        pre_non_vec = [m for m in pre if m.get("rrf_only", False)]
+        pre_vec = [m for m in pre if not m.get("rrf_only", False)]
+        filtered = pre_vec + pre_non_vec[: settings.RERANKER_CANDIDATES]
         if filtered:
             filtered = _rerank_or_fallback(tools, filtered, query)
 
@@ -240,6 +250,19 @@ def filter_rerank_cases(
             if (not require_device or m.get("device_type") == require_device)
             and (not require_keywords or any(k in _searchable(m) for k in require_keywords))
         ]
+        # 错误码权威放行：错误码精确命中手册（manual_code_exact）的条目必定保留。
+        # 场景：查询是"整段英文设备日志"，extract_device_and_fault 会把日志单词当关键词，
+        # 而手册条目标是中文（如"伺服位置偏差过大报警"），既不含英文关键词也不匹配设备词，
+        # 严格过滤会把这些"错误码权威命中"的正确答案误杀。错误码精确匹配本就是最高优先级标
+        # 准，不应被标签/关键词二次约束，故在此补充合并而非直接替换过滤结果。
+        if error_codes:
+            exact_hits = [
+                m for m in filtered
+                if m.get("method") == "manual_code_exact"
+            ]
+            if exact_hits:
+                seen = {id(x) for x in strict}
+                strict = strict + [m for m in exact_hits if id(m) not in seen]
         if not strict:
             logger.info(f"[RetrievalFlow] 严格过滤后无候选（设备={require_device!r} 关键词={list(require_keywords)}），返回空结果")
 
@@ -257,7 +280,16 @@ def filter_rerank_cases(
 
     if bm25_only_degraded:
         return strict[:top_n]   # 降级模式无向量分，不做 0.15 二次过滤
-    return [m for m in strict if m.get("score", 0) >= settings.RETRIEVAL_COARSE_THRESHOLD][:top_n]
+    # 末段二次过滤：用 _sort_key（rerank_score>向量分>rrf）统一口径
+    # 修复：BM25/手册精确路命中的案例向量分可能为0，但经Reranker精排后 rerank_score 很高，之前纯按 score 过滤会被误杀
+    # 注意：错误码权威命中（manual_code_exact）作为最高优先级标准，无论分数多低都必须保留，
+    #       避免降级/超时路径下 rrf 或加权分过低被二次过滤误拦（SV0401 "伺服位置偏差过大报警" 场景）。
+    result = [
+        m for m in strict
+        if m.get("method") == "manual_code_exact"
+        or _sort_key(m) >= settings.RETRIEVAL_COARSE_THRESHOLD
+    ]
+    return result[:top_n]
 
 
 def evaluate_retrieval_quality(results: List[dict]) -> dict:

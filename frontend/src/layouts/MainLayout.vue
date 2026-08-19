@@ -452,14 +452,14 @@ const filteredNotices = computed(() => {
 
 const fetchUnreadCount = async () => {
   try {
-    const res = await request.get('/notifications/unread-count')
+    const res = await request.get('/notifications/unread-count', { timeout: 120000 })
     unreadCount.value = res.count || 0
   } catch { /* 静默 */ }
 }
 
 const fetchNotifications = async () => {
   try {
-    const res = await request.get('/notifications/', { params: { page: 1, page_size: 20 } })
+    const res = await request.get('/notifications/', { params: { page: 1, page_size: 20 }, timeout: 120000 })
     notices.value = (res.items || []).map(n => ({
       ...n,
       read: n.is_read,
@@ -470,7 +470,7 @@ const fetchNotifications = async () => {
 
 const markAllRead = async () => {
   try {
-    await request.post('/notifications/read-all')
+    await request.post('/notifications/read-all', {}, { timeout: 120000 })
     notices.value.forEach(n => { n.read = true; n.is_read = true })
     unreadCount.value = 0
     ElMessage.success('已全部标记为已读')
@@ -480,7 +480,7 @@ const markAllRead = async () => {
 const handleNoticeClick = async (item) => {
   try {
     if (!item.is_read) {
-      await request.post(`/notifications/${item.id}/read`)
+      await request.post(`/notifications/${item.id}/read`, {}, { timeout: 120000 })
       item.is_read = true
       item.read = true
       unreadCount.value = Math.max(0, unreadCount.value - 1)

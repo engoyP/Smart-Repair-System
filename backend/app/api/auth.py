@@ -27,7 +27,7 @@ CODE_COOLDOWN_SECONDS = 60  # 60 秒内不可重复发送
 # 钉钉扫码登录状态管理
 # state -> { status: 'pending'|'scanned'|'confirmed'|'expired', user_info: dict, created_at, }
 _dingtalk_scan_sessions: dict[str, dict] = {}
-SCAN_EXPIRE_SECONDS = 120  # 二维码 120 秒过期（过短会导致扫码授权期间二维码刷新，PC端与手机端 state 失配）
+SCAN_EXPIRE_SECONDS = 600  # 二维码 600 秒（10 分钟）过期，给足扫码 + 手机授权时间
 _scan_expire_check_running = False
 
 
