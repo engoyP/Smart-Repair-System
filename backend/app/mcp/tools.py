@@ -81,7 +81,7 @@ def search_knowledge(query: str) -> str:
         return "请输入故障描述，例如：注塑机 温度过高"
     try:
         from app.agents.retrieval_flow import retrieve_hybrid, extract_device_and_fault, filter_rerank_cases
-        from app.agents.answer_agent import answer_agent
+        from app.agents.answer_generator import answer_generator
 
         merged, error_codes, tools = retrieve_hybrid(query, top_k=10)
         device, kws = extract_device_and_fault(tools, query)
@@ -90,7 +90,7 @@ def search_knowledge(query: str) -> str:
             require_device=device, require_keywords=tuple(kws),
             error_codes=error_codes,
         )
-        result = answer_agent.answer(query, cases)
+        result = answer_generator.answer(query, cases)
         return result.answer
     except Exception as e:
         logger.warning(f"[MCP] 知识检索失败: {e}")
@@ -528,8 +528,8 @@ def query_inventory(question: str) -> str:
         return "请输入备件查询，例如：查一下保险丝的库存"
     db = SessionLocal()
     try:
-        from app.agents.answer_agent import answer_agent
-        result = answer_agent.handle_inventory_query(question.strip(), db)
+        from app.agents.answer_generator import answer_generator
+        result = answer_generator.handle_inventory_query(question.strip(), db)
         return result.answer
     finally:
         db.close()

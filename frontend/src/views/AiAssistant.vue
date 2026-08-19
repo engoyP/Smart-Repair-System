@@ -106,31 +106,34 @@
         </div>
       </div>
 
-      <!-- ===== 三种模式介绍（从维修人员角度选择） ===== -->
-      <div class="mode-intro">
-        <div class="mode-intro-title">
+      <!-- ===== 三种模式介绍（可折叠，默认记住收起状态） ===== -->
+      <div class="mode-intro" :class="{ collapsed: !modeIntroExpanded }">
+        <div class="mode-intro-title" @click="toggleModeIntro">
           <span class="mi-label">三种模式怎么选？</span>
-          <span class="mi-tip">点击卡片查看适用场景，再点一次可切换模式</span>
+          <span class="mi-tip">{{ modeIntroExpanded ? '点击卡片切换模式，点标题栏收起' : '点击展开查看适用场景' }}</span>
+          <el-icon class="mi-arrow" :class="{ expanded: modeIntroExpanded }"><ArrowDown /></el-icon>
         </div>
-        <div class="mode-intro-cards">
-          <div
-            v-for="card in modeIntroCards"
-            :key="card.mode"
-            class="mode-intro-card"
-            :class="{ active: repairMode === card.mode }"
-            @click="switchMode(card.mode)"
-          >
-            <div class="mi-card-head">
-              <div class="mi-icon" :style="{ background: card.color }">
-                <el-icon :size="16" color="#fff"><component :is="card.icon" /></el-icon>
+        <el-collapse-transition>
+          <div v-show="modeIntroExpanded" class="mode-intro-cards">
+            <div
+              v-for="card in modeIntroCards"
+              :key="card.mode"
+              class="mode-intro-card"
+              :class="{ active: repairMode === card.mode }"
+              @click="switchMode(card.mode)"
+            >
+              <div class="mi-card-head">
+                <div class="mi-icon" :style="{ background: card.color }">
+                  <el-icon :size="16" color="#fff"><component :is="card.icon" /></el-icon>
+                </div>
+                <span class="mi-name">{{ card.name }}</span>
               </div>
-              <span class="mi-name">{{ card.name }}</span>
+              <div class="mi-when"><span class="mi-when-label">适合</span>{{ card.when }}</div>
+              <div class="mi-example"><span class="mi-example-label">例如</span>{{ card.example }}</div>
+              <div class="mi-desc">{{ card.desc }}</div>
             </div>
-            <div class="mi-when"><span class="mi-when-label">适合</span>{{ card.when }}</div>
-            <div class="mi-example"><span class="mi-example-label">例如</span>{{ card.example }}</div>
-            <div class="mi-desc">{{ card.desc }}</div>
           </div>
-        </div>
+        </el-collapse-transition>
       </div>
 
       <!-- ===== 聊天内容区（问答/追踪共用） ===== -->
@@ -218,15 +221,14 @@
                         <span class="chip-score">{{ (item.score * 100).toFixed(0) }}%</span>
                       </div>
                     </div>
-                    <!-- 专家模式排查方向选项 -->
+                    <!-- 专家模式排查方向选项（纯文字展示，不提供点击） -->
                     <div v-if="msg.options?.length" class="msg-options">
-                      <div class="options-title">排查方向<span class="options-hint">点击选择，第 1 个为推荐</span></div>
+                      <div class="options-title">排查方向<span class="options-hint">按顺序第 1 个为推荐</span></div>
                       <div
                         v-for="(opt, oi) in msg.options"
                         :key="opt.id || oi"
                         class="option-card"
                         :class="{ 'option-recommend': oi === 0 }"
-                        @click="sendOption(opt)"
                       >
                         <div class="option-head">
                           <span class="option-badge">{{ oi === 0 ? '推荐' : (opt.id || ('选项' + (oi + 1))) }}</span>
@@ -405,6 +407,14 @@ const modeIntroCards = [
     desc: 'AI 把复合问题拆成多个单故障，分别检索各自的历史案例、按故障分组回答；并判断是否同根因、给出维修优先级，像老师傅一样逐步引导排查。',
   },
 ]
+
+// ===== 模式介绍折叠面板（记住用户的展开/收起选择） =====
+const MODE_INTRO_KEY = 'ai_mode_intro_collapsed'
+const modeIntroExpanded = ref(localStorage.getItem(MODE_INTRO_KEY) !== '1')
+const toggleModeIntro = () => {
+  modeIntroExpanded.value = !modeIntroExpanded.value
+  localStorage.setItem(MODE_INTRO_KEY, modeIntroExpanded.value ? '0' : '1')
+}
 
 const editingTitleId = ref(null)
 const editingTitleValue = ref('')
@@ -772,12 +782,6 @@ const compressSession = async (session) => {
 const sendMessage = (text) => {
   inputText.value = text
   handleSend()
-}
-
-// 专家模式：点击排查方向选项 → 作为下一轮反馈发送（多轮引导）
-const sendOption = (opt) => {
-  if (sending.value) return
-  sendMessage(`执行排查方向：${opt.cause}｜${opt.diagnostic_action}`)
 }
 
 const handleSend = async () => {
@@ -1412,12 +1416,6 @@ const showSourceDetail = (item) => {
   background: var(--color-bg-page);
   border: 1px solid var(--color-border-light);
   border-radius: 8px;
-  cursor: pointer;
-  transition: all .15s;
-}
-.option-card:hover {
-  border-color: var(--color-primary);
-  box-shadow: 0 2px 8px rgba(51, 112, 255, .12);
 }
 .option-card.option-recommend {
   border-color: var(--color-primary);
@@ -1694,11 +1692,30 @@ const showSourceDetail = (item) => {
   padding: 12px 24px 0;
   flex-shrink: 0;
 }
+.mode-intro.collapsed {
+  padding-bottom: 8px;
+}
 .mode-intro-title {
   display: flex;
   align-items: center;
   gap: 8px;
   margin-bottom: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+.mode-intro.collapsed .mode-intro-title {
+  margin-bottom: 0;
+}
+.mode-intro-title:hover .mi-label {
+  color: #0FC6C2;
+}
+.mi-arrow {
+  margin-left: auto;
+  color: var(--color-text-secondary);
+  transition: transform .3s;
+}
+.mi-arrow.expanded {
+  transform: rotate(180deg);
 }
 .mi-label {
   font-size: 13px;

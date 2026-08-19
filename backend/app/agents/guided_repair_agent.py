@@ -19,47 +19,28 @@ from app.core.langfuse_tracer import tracer
 
 # ============================================================
 # 会话内无关消息拦截（追踪维修对话中的闲聊/非维修内容）
+#   统一使用 retrieval_flow 提供的公共三层阀门实现：
+#   ① regex 错误码 → ② 关键词白名单 → ③ 检索打分（cases 空或 max_score<阈值才最终拦截）
+#   本地仅保留 _IRRELEVANT_REPLY 文案别名（与公共版 REPAIR_IRRELEVANT_REPLY 一致），以及
+#   老签名兼容函数 _is_repair_irrelevant（委托公共版，不调用检索）。
 # ============================================================
-_REPAIR_RELATED_KEYWORDS = (
-    # 设备
-    "注塑机", "数控", "机床", "液压", "传送带", "空压机", "压缩机", "变压器", "电机",
-    "电动机", "锅炉", "制冷", "机器人", "PLC", "传感器", "继电器", "变频器", "伺服",
-    "驱动器", "主轴", "刀库", "轴承", "齿轮", "油泵", "水泵", "气泵", "马达", "气缸",
-    "油缸", "阀门", "开关", "电源", "线路", "电路", "主板", "屏幕", "电池", "设备",
-    "机组", "机器", "装置", "密封圈", "滤芯", "皮带", "链条",
-    # 故障现象
-    "温度", "压力", "电压", "电流", "报警", "异响", "振动", "漏油", "漏水", "死机",
-    "黑屏", "不转", "不启动", "跳闸", "过热", "过载", "堵塞", "卡死", "断电", "短路",
-    "故障", "坏了", "异常", "无响应", "停机", "不工作", "松动", "磨损", "烧毁", "冒烟",
-    "异味", "抖动", "卡顿", "闪退", "失灵", "渗油", "红灯",
-    # 排查反馈
-    "检查", "正常", "更换", "清理", "调整", "测试", "开机", "重启", "好了", "解决",
-    "试机", "运行", "恢复", "排除", "确认", "测量", "紧固", "校正", "运转", "复位",
-    "清洗", "加油", "换油", "拆卸", "安装",
+from app.agents.retrieval_flow import (
+    repair_intent_fast_check as _repair_intent_fast_check,
+    repair_intent_check as _repair_intent_check,
+    REPAIR_IRRELEVANT_REPLY as _IRRELEVANT_REPLY,
 )
-
-# 简短应答词：排查过程中的跟进性回复，放行避免打断节奏
-_SHORT_ACK_WORDS = (
-    "嗯", "好", "好的", "行", "可以", "继续", "然后", "下一步", "接下来", "对",
-    "是的", "ok", "OK", "试过了", "查了", "拆了", "装了", "换了", "清了", "加了",
-    "检查了",
-)
-
-_IRRELEVANT_REPLY = ("这条消息和设备维修无关，我先不继续排查。\n"
-                     "如果是设备故障，请描述具体的设备和故障现象，例如："
-                     "注塑机温度过高、空压机不启动、PLC 报错。")
 
 
 def _is_repair_irrelevant(message: str) -> bool:
-    """判断追踪维修会话内的消息是否与设备维修无关（闲聊拦截）"""
-    text = (message or "").strip()
-    if not text:
+    """老签名兼容：只跑 ①② 两层快判定，没命中则"宁放行不误拦"（不调用检索）
+    chat/achat 中请直接走 chat 里的新版流程（intent=check 时先跑检索再判空）。"""
+    r = _repair_intent_fast_check(message)
+    if r.get("decision") == "related":
+        return False
+    if r.get("decision") == "irrelevant":
         return True
-    if any(kw in text for kw in _REPAIR_RELATED_KEYWORDS):
-        return False
-    if len(text) <= 4 and any(kw in text for kw in _SHORT_ACK_WORDS):
-        return False
-    return True
+    # decision="check"（需要检索判定但没调用检索）→ 放行（调用方应直接走 repair_intent_check）
+    return False
 
 
 @dataclass
@@ -196,7 +177,7 @@ class GuidedRepairAgent:
             if h.get("ai"):
                 msgs.append({"role": "assistant", "content": h["ai"]})
         try:
-            from app.agents.session_agent import session_summarizer
+            from app.agents.session_summarizer import session_summarizer
             summary = session_summarizer.summarize(msgs)
         except Exception as e:
             logger.warning(f"[GuidedRepair] 历史摘要压缩失败，保留原文: {e}")
@@ -233,23 +214,31 @@ class GuidedRepairAgent:
         return sid
 
     def _search_knowledge(self, query: str, device_type: str = "") -> List[Dict]:
-        """检索知识库（公共编排层）：向量 + BM25 → RRF → 粗筛 → 模型/规则精排 → 验证取 top3"""
+        """检索知识库（公共编排层）：向量 + BM25 + 手册错误码路 → RRF → 粗筛 → 精排 → 取 top3
+
+        与问答模块同口径：先按设备/故障关键词严格过滤；严格过滤后为空时降级宽松
+        （仅错误码置顶、不做设备/关键词约束），保证追踪引导不因跨设备误伤而"突然无案例"。
+        """
         try:
-            from app.agents.retrieval_flow import make_tools, retrieve_hybrid, filter_rerank_cases
+            from app.agents.retrieval_flow import (
+                make_tools, retrieve_hybrid, filter_rerank_cases, extract_device_and_fault,
+            )
             tools = make_tools()
             merged, error_codes, tools = retrieve_hybrid(
                 query, top_k=10, device_type=device_type,
             )
+            device, kws = extract_device_and_fault(tools, query)
             cases = filter_rerank_cases(
-                tools, merged, query, top_n=5, error_codes=error_codes,
+                tools, merged, query, top_n=5,
+                require_device=device, require_keywords=tuple(kws),
+                error_codes=error_codes,
             )
-            try:
-                from app.agents.verify_agent import verify_agent
-                verified, _report = verify_agent.verify(query, cases, device_type=device_type)
-                return verified[:3]
-            except Exception as e:
-                logger.warning(f"[GuidedRepair] 验证降级，返回原检索结果: {e}")
-                return cases[:3]
+            if not cases:
+                # 严格过滤空 → 降级宽松（仅错误码置顶，不做设备/关键词约束）
+                cases = filter_rerank_cases(
+                    tools, merged, query, top_n=5, error_codes=error_codes,
+                )
+            return cases[:3]
         except Exception as e:
             logger.error(f"[GuidedRepair] 知识检索失败: {e}")
             return []
@@ -549,8 +538,9 @@ class GuidedRepairAgent:
 
     def chat(self, session_id: str, message: str, device_type: str = "") -> str:
         """对话式追踪：用户发消息，AI 流式回复"""
-        # 无关消息拦截：闲聊/与维修无关的内容不进入排查对话
-        if _is_repair_irrelevant(message):
+        # 三层阀门：①regex 错误码 ②关键词 → 都不过则 ③ 检索判定（cases 空=无关）
+        fast = _repair_intent_fast_check(message)
+        if fast.get("decision") == "irrelevant":
             yield AIMessageChunk(content=_IRRELEVANT_REPLY)
             return
         # 获取或创建会话（Redis 持久化）
@@ -567,9 +557,12 @@ class GuidedRepairAgent:
             }
         session["step_count"] += 1
 
-        # 检索知识库
+        # 检索知识库（第三步闸门：decision=check 且 cases 空 → 护栏；related 时照常过）
         search_query = f"{session['initial_symptoms']} {message}"
         cases = self._search_knowledge(search_query, session.get("device_type", ""))
+        if fast.get("decision") == "check" and not cases:
+            yield AIMessageChunk(content=_IRRELEVANT_REPLY)
+            return
 
         # 构建案例文本（缩短内容，只取关键信息，避免 LLM 复制完整流程）
         cases_text = ""
@@ -629,8 +622,9 @@ class GuidedRepairAgent:
 
     async def achat(self, session_id: str, message: str, device_type: str = ""):
         """对话式追踪（异步流式，用于 SSE 端点，避免线程池死锁）"""
-        # 无关消息拦截：闲聊/与维修无关的内容不进入排查对话
-        if _is_repair_irrelevant(message):
+        # 三层闸门（同 chat）
+        fast = _repair_intent_fast_check(message)
+        if fast.get("decision") == "irrelevant":
             yield AIMessageChunk(content=_IRRELEVANT_REPLY)
             return
         # 获取或创建会话（Redis 持久化）
@@ -649,10 +643,13 @@ class GuidedRepairAgent:
         session["step_count"] += 1
         session["last_user"] = message
 
-        # 检索知识库
+        # 检索知识库（第三步闸门：decision=check 且 cases 空 → 护栏）
         search_query = f"{session['initial_symptoms']} {message}"
         cases = self._search_knowledge(search_query, session.get("device_type", ""))
         session["cases"] = cases
+        if fast.get("decision") == "check" and not cases:
+            yield AIMessageChunk(content=_IRRELEVANT_REPLY)
+            return
 
         # 构建案例文本（缩短内容，只取关键信息）
         cases_text = ""

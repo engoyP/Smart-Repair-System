@@ -1,4 +1,4 @@
-"""AnswerAgent - 分析型问答 Agent
+"""AnswerGenerator - 分析型回答生成器（功能工具模块，非 Agent）
 
 功能：
 - 基于检索到的历史维修案例，生成分析回答
@@ -40,8 +40,8 @@ class AnswerResult:
     thinking_process: str = ""
 
 
-class AnswerAgent:
-    """分析型问答 Agent - 基于历史案例生成回答"""
+class AnswerGenerator:
+    """分析型回答生成器 - 基于历史案例生成回答（单次 LLM 调用，智能在上游检索与验证）"""
 
     SYSTEM_PROMPT = """你是一个设备维修知识库检索助手。你的唯一职责是：基于系统提供的检索案例，如实回答用户问题。
 
@@ -194,7 +194,7 @@ class AnswerAgent:
                 query = query.filter(or_(*conditions))
             results = query.all()
         except Exception as e:
-            logger.error(f"[AnswerAgent] 库存查询失败: {e}")
+            logger.error(f"[AnswerGenerator] 库存查询失败: {e}")
             return AnswerResult(
                 question=question,
                 answer="库存查询服务暂时不可用，请稍后重试。",
@@ -367,7 +367,7 @@ class AnswerAgent:
                 thinking_process=thinking,
             )
         except Exception as e:
-            logger.error(f"[AnswerAgent] 回答生成失败: {e}")
+            logger.error(f"[AnswerGenerator] 回答生成失败: {e}")
             return AnswerResult(
                 question=question,
                 answer=f"回答生成失败，请稍后重试。错误: {str(e)[:200]}",
@@ -563,7 +563,7 @@ class AnswerAgent:
                 trace_ctx.score("answer_confidence", confidence)
 
         except Exception as e:
-            logger.error(f"[AnswerAgent] 流式生成失败: {e}")
+            logger.error(f"[AnswerGenerator] 流式生成失败: {e}")
             yield f"data: {json.dumps({'type': 'answer', 'content': f'回答生成失败，请稍后重试。'}, ensure_ascii=False)}\n\n"
 
         # 发送完成信号
@@ -652,7 +652,7 @@ class AnswerAgent:
                 confidence = self._estimate_confidence(all_cases)
                 trace_ctx.score("answer_confidence", confidence)
         except Exception as e:
-            logger.error(f"[AnswerAgent] 多故障流式生成失败: {e}")
+            logger.error(f"[AnswerGenerator] 多故障流式生成失败: {e}")
             yield f"data: {json.dumps({'type': 'answer', 'content': '回答生成失败，请稍后重试。'}, ensure_ascii=False)}\n\n"
 
         # 发送完成信号
@@ -690,4 +690,4 @@ class AnswerAgent:
         return round(confidence, 2)
 
 
-answer_agent = AnswerAgent()
+answer_generator = AnswerGenerator()

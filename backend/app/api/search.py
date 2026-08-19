@@ -15,15 +15,16 @@ from app.core.security import get_current_user
 from app.agents.tools import RetrievalTools, rrf_merge
 from app.agents.retrieval_flow import (
     make_tools as _make_tools,
+    retrieve_hybrid as _retrieve_hybrid,
     extract_device_and_fault as _extract_device_and_fault,
     filter_rerank_cases as _filter_rerank_cases,
+    evaluate_retrieval_quality as _evaluate_retrieval_quality,
 )
 from app.agents.retrieval_agent import RetrievalAssistantAgent
-from app.agents.answer_agent import answer_agent
+from app.agents.answer_generator import answer_generator
 from app.agents.fault_decomposer import fault_decomposer
 from app.agents.guided_repair_agent import guided_repair_agent
 from app.agents.expert_repair_agent import expert_repair_agent, ExpertOption, ExpertStepResult
-from app.agents.verify_agent import verify_agent
 
 router = APIRouter()
 
@@ -357,8 +358,13 @@ async def analyze_answer_stream(
         # 立即响应，让前端显示"正在思考..."
         yield f"data: {json_module.dumps({'type': 'thinking'}, ensure_ascii=False)}\n\n"
 
+        # 三层维修意图阀门（只对最终 kind=fault 生效；chat/inventory 原本就无需检索）
+        from app.agents.retrieval_flow import (
+            make_tools, repair_intent_check, REPAIR_IRRELEVANT_REPLY,
+        )
+        tools = make_tools()
+
         # 走 LangGraph 主图 + 子图：意图路由（聊天/库存/故障）→ 对应子图执行。
-        # 行为与旧 if-else 流程一致，聊天/库存不再空跑一轮检索。
         from app.agents.qa_graph import invoke_qa
         try:
             state = await asyncio.to_thread(
@@ -390,15 +396,30 @@ async def analyze_answer_stream(
             return
 
         # ---- 故障子图：复合故障提示 → 参考案例 → 流式生成 ----
+        # 统一三层阀门：①②全不命中且检索 cases 空/低分 → 直接护栏回复，不调用 LLM 生成
+        cases = (payload or {}).get("cases") or []
+        if not cases:
+            # qa_graph 已跑 retrieve_hybrid + filter_rerank_cases + 宽松降级还空
+            # 此时再走一次独立的 repair_intent_check（复用规则+相同检索逻辑保证口径）
+            chk = repair_intent_check(
+                request.question, tools, request.device_type,
+                top_k=request.top_k or 8,
+            )
+            if chk["decision"] == "irrelevant":
+                yield f"data: {json_module.dumps({'type': 'answer', 'content': REPAIR_IRRELEVANT_REPLY}, ensure_ascii=False)}\n\n"
+                yield f"data: {json_module.dumps({'type': 'done', 'confidence': 0, 'sources_count': 0}, ensure_ascii=False)}\n\n"
+                return
+            # 阀门判为 related 但 qa_graph cases 为空（罕见：不同参数下的差异），仍按原链路走
+            cases = chk["cases"]
+
         if state.get("suggest_expert"):
             yield f"data: {json_module.dumps({'type': 'suggest_expert'}, ensure_ascii=False)}\n\n"
 
-        cases = (payload or {}).get("cases") or []
         references = [_to_reference(ref) for ref in cases[:8]]
         yield f"event: references\ndata: {json_module.dumps(references, ensure_ascii=False)}\n\n"
 
         try:
-            for sse_msg in answer_agent.stream_answer(request.question, cases):
+            for sse_msg in answer_generator.stream_answer(request.question, cases):
                 yield sse_msg
         except Exception as e:
             logger.error(f"流式生成失败: {e}")
@@ -427,14 +448,15 @@ async def expert_answer_stream(
     - {"type": "done", "confidence": 0.8, "sources_count": 3} — 完成
     """
     import json as json_module
+    from app.agents.retrieval_flow import repair_intent_check, REPAIR_IRRELEVANT_REPLY
 
     async def stream():
         yield f"data: {json_module.dumps({'type': 'thinking'}, ensure_ascii=False)}\n\n"
 
         # Step 0: 库存查询前置（与普通问答保持一致）
-        if answer_agent.is_inventory_query(request.question):
+        if answer_generator.is_inventory_query(request.question):
             from app.models.spare_part import SparePart
-            result = answer_agent.handle_inventory_query(request.question, db)
+            result = answer_generator.handle_inventory_query(request.question, db)
             yield f"data: {json_module.dumps({'type': 'answer', 'content': result.answer}, ensure_ascii=False)}\n\n"
             yield f"data: {json_module.dumps({'type': 'done', 'confidence': 0, 'sources_count': 0}, ensure_ascii=False)}\n\n"
             return
@@ -452,15 +474,14 @@ async def expert_answer_stream(
             sub_queries = [request.question]
         sub_queries = sub_queries or [request.question]
 
-        # ===== 多故障：分组并行 ReAct 检索 + 分组回答 =====
+        # ===== 多故障：分组并行（管道优先 + ReAct 救援）检索 + 分组回答 =====
         if len(sub_queries) > 1:
             try:
                 per_fault_results = await asyncio.wait_for(
                     asyncio.gather(*[
                         asyncio.to_thread(
-                            _run_agent_search, tools, sq,
+                            _pipeline_first_with_rescue, tools, sq,
                             request.device_type, request.fault_code, request.top_k,
-                            True,  # require_hybrid=True：首轮强制 vector+BM25 双路
                         )
                         for sq in sub_queries
                     ]),
@@ -473,19 +494,21 @@ async def expert_answer_stream(
                 logger.error(f"[Expert] 多故障并行检索失败: {e}")
                 per_fault_results = [[] for _ in sub_queries]
 
+            # 统一三层阀门：所有子故障 cases 全空 → 再跑 repair_intent_check 确认
+            if not any(per_fault_results):
+                chk = repair_intent_check(
+                    request.question, tools, request.device_type,
+                    top_k=request.top_k or 8,
+                )
+                if chk["decision"] == "irrelevant":
+                    yield f"data: {json_module.dumps({'type': 'answer', 'content': REPAIR_IRRELEVANT_REPLY}, ensure_ascii=False)}\n\n"
+                    yield f"data: {json_module.dumps({'type': 'done', 'confidence': 0, 'sources_count': 0}, ensure_ascii=False)}\n\n"
+                    return
+
             faults = []
             references = []
             for sq, res in zip(sub_queries, per_fault_results):
-                device, kws = _extract_device_and_fault(tools, sq)
-                cases = _filter_rerank_cases(tools, res, sq,
-                                             require_device=device, require_keywords=tuple(kws))
-                # 验证 Agent：存在性核对 + 语义可答性（LLM 校验放线程，避免阻塞事件循环）
-                try:
-                    verified, _report = await asyncio.to_thread(
-                        verify_agent.verify, sq, cases, device)
-                    cases = verified or cases
-                except Exception as e:
-                    logger.warning(f"[Expert] 验证降级: {e}")
+                cases = res  # 已严格过滤 + 精排
                 faults.append({"name": sq, "cases": cases})
                 for ref in cases:
                     references.append(_to_reference(ref, fault=sq))
@@ -502,7 +525,7 @@ async def expert_answer_stream(
             yield f"event: references\ndata: {json_module.dumps(references, ensure_ascii=False)}\n\n"
 
             try:
-                for sse_msg in answer_agent.stream_answer_multi(request.question, faults, emit_done=False):
+                for sse_msg in answer_generator.stream_answer_multi(request.question, faults, emit_done=False):
                     yield sse_msg
             except Exception as e:
                 logger.error(f"[Expert] 多故障流式生成失败: {e}")
@@ -513,32 +536,33 @@ async def expert_answer_stream(
             yield f"data: {json_module.dumps({'type': 'done', 'confidence': 0, 'sources_count': len(references), 'session_id': session_id}, ensure_ascii=False)}\n\n"
             return
 
-        # ===== 单故障：ReAct 智能检索（强制混合）+ 五段式分析回答 =====
-        merged = []
+        # ===== 单故障：管道优先 + ReAct 救援 + 五段式分析回答 =====
+        filtered_merged = []
         try:
-            merged = await asyncio.wait_for(
-                asyncio.to_thread(_run_agent_search, tools, sub_queries[0],
-                                  request.device_type, request.fault_code, request.top_k,
-                                  True),  # require_hybrid=True：首轮强制 vector+BM25 双路
-                timeout=60,            # 单故障 ReAct 检索超时 60s
+            filtered_merged = await asyncio.wait_for(
+                asyncio.to_thread(_pipeline_first_with_rescue, tools, sub_queries[0],
+                                  request.device_type, request.fault_code, request.top_k),
+                timeout=60,            # 单故障检索超时 60s
             )
         except asyncio.TimeoutError:
-            logger.error("[Expert] 单故障 ReAct 检索超时")
-            merged = []
+            logger.error("[Expert] 单故障检索超时")
+            filtered_merged = []
         except Exception as e:
-            logger.error(f"[Expert] ReAct 智能检索失败: {e}")
-            merged = []
+            logger.error(f"[Expert] 检索失败: {e}")
+            filtered_merged = []
 
-        device, kws = _extract_device_and_fault(tools, sub_queries[0])
-        filtered_merged = _filter_rerank_cases(tools, merged, request.question,
-                                               require_device=device, require_keywords=tuple(kws))
-        # 验证 Agent：存在性核对 + 语义可答性（LLM 校验放线程，避免阻塞事件循环）
-        try:
-            verified, _report = await asyncio.to_thread(
-                verify_agent.verify, request.question, filtered_merged, device)
-            filtered_merged = verified or filtered_merged
-        except Exception as e:
-            logger.warning(f"[Expert] 验证降级: {e}")
+        # 统一三层阀门：cases 全空且 retrieval_empty → 护栏
+        if not filtered_merged:
+            chk = repair_intent_check(
+                request.question, tools, request.device_type,
+                top_k=request.top_k or 8,
+            )
+            if chk["decision"] == "irrelevant":
+                yield f"data: {json_module.dumps({'type': 'answer', 'content': REPAIR_IRRELEVANT_REPLY}, ensure_ascii=False)}\n\n"
+                yield f"data: {json_module.dumps({'type': 'done', 'confidence': 0, 'sources_count': 0}, ensure_ascii=False)}\n\n"
+                return
+            filtered_merged = chk["cases"]  # 阀门可能给了 related cases
+
         references = [_to_reference(ref) for ref in filtered_merged[:8]]
         faults_single = [{"name": sub_queries[0], "cases": filtered_merged}]
 
@@ -551,7 +575,7 @@ async def expert_answer_stream(
         yield f"event: references\ndata: {json_module.dumps(references, ensure_ascii=False)}\n\n"
 
         try:
-            for sse_msg in answer_agent.stream_answer(request.question, filtered_merged, emit_done=False):
+            for sse_msg in answer_generator.stream_answer(request.question, filtered_merged, emit_done=False):
                 yield sse_msg
         except Exception as e:
             logger.error(f"[Expert] 流式生成失败: {e}")
@@ -581,7 +605,7 @@ async def expert_next_step(request: ExpertStepRequest,
         try:
             result = await asyncio.wait_for(
                 asyncio.to_thread(expert_repair_agent.next_step, request.session_id, request.message),
-                timeout=60,          # 引导轮超时 60s，超时给可感知的降级提示
+                timeout=90,          # 引导轮超时 90s（检索+精排+LLM 生成），超时给可感知的降级提示
             )
         except asyncio.TimeoutError:
             logger.error("[Expert] 专家引导轮超时")
@@ -621,6 +645,33 @@ def _run_agent_search(tools: RetrievalTools, query: str, device_type: Optional[s
         require_hybrid=require_hybrid,
     )
     return result.results
+
+
+def _pipeline_first_with_rescue(tools: RetrievalTools, query: str,
+                                device_type: Optional[str], fault_code: Optional[str],
+                                top_k: int) -> List[dict]:
+    """专家模式检索核心：管道四路优先 → 阀门判定 → 不达标才 ReAct 救援。
+
+    ① 先跑确定性的四路管道（retrieve_hybrid + 严格过滤 + 精排 + 置顶），零 LLM 决策，秒级返回。
+    ② 用公共阀门 evaluate_retrieval_quality 判定结果是否充分（≥3 条且（高分≥2 或最高分≥0.7））。
+    ③ 充分 → 直接返回（省掉 ReAct 延迟）；不足 → ReAct 救援（原必跑行为）→ 严格过滤收口。
+    返回已严格过滤 + 精排的最终案例列表，供首轮分组 / 单故障分支直接使用。
+    """
+    merged, error_codes, tools = _retrieve_hybrid(query, top_k=top_k, device_type=device_type)
+    device, kws = _extract_device_and_fault(tools, query)
+    cases = _filter_rerank_cases(tools, merged, query,
+                                 require_device=device, require_keywords=tuple(kws),
+                                 error_codes=error_codes)
+    # 管道充分 → 直接交付，省掉 ReAct 延迟
+    if _evaluate_retrieval_quality(cases)["sufficient"]:
+        return cases
+
+    # 管道不足 → ReAct 救援（首轮强制 vector+BM25 双路），再严格过滤收口
+    logger.info(f"[Expert] 管道检索质量不足，触发 ReAct 救援: {query[:50]}")
+    rescue_results = _run_agent_search(tools, query, device_type, fault_code, top_k, True)
+    device, kws = _extract_device_and_fault(tools, query)
+    return _filter_rerank_cases(tools, rescue_results, query,
+                                require_device=device, require_keywords=tuple(kws))
 
 
 def _to_reference(ref: dict, fault: str = "") -> dict:

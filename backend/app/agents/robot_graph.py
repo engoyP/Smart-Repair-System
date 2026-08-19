@@ -134,8 +134,8 @@ def route_intent(state: RobotState) -> str:
     if any(k in text for k in ("排班", "值班", "班表", "班次")):
         return "duty"
     try:
-        from app.agents.answer_agent import answer_agent
-        if answer_agent.is_inventory_query(text):
+        from app.agents.answer_generator import answer_generator
+        if answer_generator.is_inventory_query(text):
             return "inventory"
     except Exception as e:
         logger.warning(f"[RobotGraph] 库存意图判断异常，跳过: {e}")
@@ -184,8 +184,34 @@ def duty_node(state: RobotState) -> dict:
 
 
 def repair_node(state: RobotState) -> dict:
+    """维修追踪引导入口：三层维修意图阀门校验后再进入 guided_repair_track
+    ① regex 错误码 → ② 关键词 → ③ 检索打分：全空返回统一护栏文案（不误导用户继续）"""
+    from app.agents.retrieval_flow import (
+        make_tools, repair_intent_check, REPAIR_IRRELEVANT_REPLY,
+    )
+    text = state.get("text") or ""
+    # ①② 快判定：无关或短闲聊直接护栏，不跑检索
+    from app.agents.retrieval_flow import repair_intent_fast_check
+    fast = repair_intent_fast_check(text)
+    if fast["decision"] == "irrelevant":
+        return {"reply": REPAIR_IRRELEVANT_REPLY + "\n\n" + (
+            "另外我也能帮您查工单、待办、排班、库存，发送「帮助」看完整清单。"
+        )}
+    # related 或 check：必走 repair_intent_check 跑检索判定
+    try:
+        tools = make_tools()
+        chk = repair_intent_check(text, tools, top_k=5)
+    except Exception as e:
+        # 检索服务异常时信任 fast_check 放行（宁放行不误拦）
+        logger.warning(f"[RobotGraph] 维修意图阀门检索异常，降级放行: {e}")
+        chk = {"decision": "related" if fast["decision"] != "irrelevant" else "irrelevant",
+               "cases": []}
+    if chk["decision"] == "irrelevant":
+        return {"reply": REPAIR_IRRELEVANT_REPLY + "\n\n" + (
+            "另外我也能帮您查工单、待办、排班、库存，发送「帮助」看完整清单。"
+        )}
     # 结构化追踪（联通复用追踪模式）：A/B/C 选项逐步排查；对话式 guided_repair_chat 保留给 MCP 工具
-    return {"reply": tools.guided_repair_track(state.get("staff_id") or "", state.get("text") or "")}
+    return {"reply": tools.guided_repair_track(state.get("staff_id") or "", text)}
 
 
 # ============================================================

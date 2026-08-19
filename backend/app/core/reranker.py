@@ -15,9 +15,13 @@ from loguru import logger
 from app.core.config import settings
 
 _SERVER_URL = settings.EMBEDDING_SERVER_URL.rstrip("/")
-_TIMEOUT = 30.0          # 30 条候选批打分，CPU 上可能 1~3s
+_TIMEOUT = 60.0          # 30 条候选分块批打分，CPU 上单块 1~5s，总预算给足
 _COOLDOWN_SECS = 60.0    # 失败冷却期：期间不再尝试调用
 _FAIL_THRESHOLD = 3      # 连续失败 N 次进入冷却期
+
+_DOC_CHAR_LIMIT = 500    # 单文档送打字符上限：cross-encoder 的判定信息集中在
+                         # 标题+正文开头，截短既提速又防服务端注意力矩阵爆内存
+_CHUNK_SIZE = 8          # 每次 HTTP 调用的文档数：分块控制服务端单批内存峰值
 
 _HTTP = httpx.Client(timeout=_TIMEOUT)
 _fail_count = 0
@@ -29,28 +33,36 @@ def _in_cooldown() -> bool:
 
 
 def rerank_scores(query: str, documents: List[str]) -> Optional[List[float]]:
-    """对 (query, doc) 批量打分，返回与 documents 同序的 0~1 分数；失败返回 None"""
+    """对 (query, doc) 批量打分，返回与 documents 同序的 0~1 分数；失败返回 None
+
+    分块调用（每块 _CHUNK_SIZE 条）：30 条长文本一次全发会让服务端
+    attention 矩阵达到数 GB 级，CPU 内存不足直接 500（实测 3.3~4.8GB 分配失败）。
+    """
     global _fail_count, _cooldown_until
     if _in_cooldown():
         return None
+    scores: List[float] = []
     try:
-        r = _HTTP.post(
-            f"{_SERVER_URL}/v1/rerank",
-            json={
-                "model": settings.RERANKER_MODEL_NAME,
-                "query": query,
-                "documents": documents,
-                "top_n": None,
-            },
-            timeout=_TIMEOUT,
-        )
-        r.raise_for_status()
-        results = r.json()["results"]
+        for start in range(0, len(documents), _CHUNK_SIZE):
+            chunk = documents[start: start + _CHUNK_SIZE]
+            r = _HTTP.post(
+                f"{_SERVER_URL}/v1/rerank",
+                json={
+                    "model": settings.RERANKER_MODEL_NAME,
+                    "query": query,
+                    "documents": chunk,
+                    "top_n": None,
+                },
+                timeout=_TIMEOUT,
+            )
+            r.raise_for_status()
+            results = r.json()["results"]
+            # 服务端按分数降序返回；还原为 chunk 同序
+            chunk_scores = [0.0] * len(chunk)
+            for item in results:
+                chunk_scores[item["index"]] = item["score"]
+            scores.extend(chunk_scores)
         _fail_count = 0
-        # 服务端按分数降序返回；还原为 documents 同序
-        scores = [0.0] * len(documents)
-        for item in results:
-            scores[item["index"]] = item["score"]
         return scores
     except Exception as e:
         _fail_count += 1
@@ -74,8 +86,10 @@ def rerank_cases(cases: List[dict], query: str) -> Optional[List[dict]]:
     """
     if not cases:
         return cases
+    # 送打分文本截短：判定信息集中在标题+正文开头，全量正文只会拖慢 CPU
+    # 并推高服务端内存（attention 随序列长平方增长）
     documents = [
-        f"{c.get('title', '')}\n{c.get('content', '')}"
+        f"{c.get('title', '')}\n{str(c.get('content', ''))[:_DOC_CHAR_LIMIT]}"
         + (f"\n错误码:{c.get('error_code')}" if c.get("error_code") else "")
         for c in cases
     ]

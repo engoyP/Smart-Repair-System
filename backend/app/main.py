@@ -140,14 +140,32 @@ os.makedirs(_uploads_dir, exist_ok=True)
 app.mount("/api/v1/upload/files", StaticFiles(directory=_uploads_dir), name="upload_files")
 
 
-@app.get("/", tags=["系统"])
+# ============================================================
+# 前端静态资源托管（SPA）：frontend/dist 构建产物
+# 放在所有 API 路由之后挂载，未匹配的路径回落到 index.html（history 路由刷新不 404）
+# ============================================================
+_frontend_dist = os.path.join(_project_root, "frontend", "dist")
+
+
+@app.get("/", tags=["系统"], include_in_schema=False)
 async def root():
+    """根路径：有前端构建产物时返回 SPA 首页，否则返回 API 信息"""
+    if os.path.isfile(os.path.join(_frontend_dist, "index.html")):
+        from fastapi.responses import FileResponse
+        return FileResponse(os.path.join(_frontend_dist, "index.html"))
     return {
         "message": f"欢迎使用 {settings.APP_NAME}",
         "version": settings.APP_VERSION,
         "docs": "/docs",
         "status": "running"
     }
+
+
+if os.path.isdir(_frontend_dist):
+    # assets 等静态资源（js/css/图片）
+    app.mount("/assets", StaticFiles(directory=os.path.join(_frontend_dist, "assets")), name="frontend_assets")
+else:
+    logger.warning(f"⚠️ 前端构建产物不存在: {_frontend_dist}，根路径将返回 API 信息（执行 npm run build 生成）")
 
 
 @app.get("/health", tags=["系统"])
@@ -159,6 +177,14 @@ async def health_check():
         "version": settings.APP_VERSION,
         "mcp": "ok"
     }
+
+
+if os.path.isdir(_frontend_dist):
+    @app.get("/{full_path:path}", tags=["系统"], include_in_schema=False)
+    async def spa_fallback(full_path: str):
+        """SPA 兜底：非 API/docs/mcp 的未匹配路径统一返回 index.html，支持前端 history 路由"""
+        from fastapi.responses import FileResponse
+        return FileResponse(os.path.join(_frontend_dist, "index.html"))
 
 
 if __name__ == "__main__":

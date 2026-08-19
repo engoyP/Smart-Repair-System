@@ -402,22 +402,25 @@ class RetrievalAssistantAgent:
             return {"reasoning": "达到终止条件", "action": "finish", "finish": True}
 
     def _evaluate_quality(self, results: List[Dict], iteration: int) -> dict:
-        """评估检索结果质量（规则判断，不用 LLM，省一次调用）"""
+        """评估检索结果质量（规则判断，不用 LLM，省一次调用）
+
+        达标判定完全委托公共阀门 retrieval_flow.evaluate_retrieval_quality，
+        此处仅保留 ReAct 特有的"到最大迭代强制达标"（防死循环）逻辑，保证与专家救援同规则。
+        """
         if len(results) == 0:
             return {"sufficient": False, "reason": "无结果"}
 
-        high_score_count = sum(1 for r in results if r.get("score", 0) >= self.MIN_SCORE_FOR_QUALITY)
-        max_score = max(r.get("score", 0) for r in results)
-
-        # 达标条件：≥3条 且（≥2条高分 或 最高分≥0.7）
-        if len(results) >= self.MIN_RESULTS_FOR_QUALITY and (high_score_count >= 2 or max_score >= settings.AGENT_QUALITY_TARGET_SCORE):
-            return {"sufficient": True, "reason": f"结果充足 ({len(results)} 条, 最高分 {max_score:.2f})"}
+        from app.agents.retrieval_flow import evaluate_retrieval_quality
+        q = evaluate_retrieval_quality(results)
+        if q["sufficient"]:
+            return q
 
         # 到最后一轮：无论如何强制算"够"（硬性结束，防死循环）
         if iteration >= self.MAX_ITERATIONS:
-            return {"sufficient": True, "reason": f"达到最大迭代次数 {self.MAX_ITERATIONS}"}
+            return {"sufficient": True, "reason": f"达到最大迭代次数 {self.MAX_ITERATIONS}",
+                    "count": len(results), "max_score": q["max_score"]}
 
-        return {"sufficient": False, "reason": f"结果不足 ({len(results)} 条, 最高分 {max_score:.2f})"}
+        return q
 
     def _summarize_results(self, results: List[Dict]) -> str:
         """生成检索结果摘要（喂给 LLM 让它知道"已经查到什么了"）"""

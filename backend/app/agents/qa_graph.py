@@ -35,12 +35,12 @@ class QaState(TypedDict, total=False):
 # 主图意图路由
 # ============================================================
 def route_qa_intent(state: QaState) -> str:
-    """库存 > 聊天 > 故障问答。判断逻辑与 AnswerAgent 内部保持一致，避免行为漂移。"""
-    from app.agents.answer_agent import answer_agent
+    """库存 > 聊天 > 故障问答。判断逻辑与 AnswerGenerator 内部保持一致，避免行为漂移。"""
+    from app.agents.answer_generator import answer_generator
     q = state.get("question") or ""
-    if answer_agent.is_inventory_query(q):
+    if answer_generator.is_inventory_query(q):
         return "inventory"
-    if not answer_agent._is_technical_query(q):
+    if not answer_generator._is_technical_query(q):
         return "chat"
     return "fault"
 
@@ -49,9 +49,9 @@ def route_qa_intent(state: QaState) -> str:
 # 子图 1：聊天（问候/功能介绍/闲聊，无检索）
 # ============================================================
 def chat_node(state: QaState) -> dict:
-    from app.agents.answer_agent import answer_agent
+    from app.agents.answer_generator import answer_generator
     q = state.get("question") or ""
-    return {"kind": "chat", "payload": answer_agent._answer_non_technical(q)}
+    return {"kind": "chat", "payload": answer_generator._answer_non_technical(q)}
 
 
 _chat_graph = StateGraph(QaState)
@@ -65,12 +65,12 @@ CHAT_SUBGRAPH = _chat_graph.compile()
 # 子图 2：库存查询
 # ============================================================
 def inventory_node(state: QaState) -> dict:
-    from app.agents.answer_agent import answer_agent
+    from app.agents.answer_generator import answer_generator
     from app.core.database import SessionLocal
     q = state.get("question") or ""
     db = SessionLocal()
     try:
-        result = answer_agent.handle_inventory_query(q, db)
+        result = answer_generator.handle_inventory_query(q, db)
         return {"kind": "inventory", "payload": result}
     except Exception as e:
         logger.error(f"[QaGraph] 库存查询失败: {e}")
@@ -141,39 +141,14 @@ def fault_filter_node(state: QaState) -> dict:
     return {"payload": payload}
 
 
-def fault_verify_node(state: QaState) -> dict:
-    """验证 Agent 节点：Gate(客观) → Judge(语义可答性) → 自主重搜 → 存在性核对(查库)
-
-    输出 verified_cases（唯一允许进入回答阶段的信息源），杜绝回答胡编乱造。
-    """
-    from app.agents.verify_agent import verify_agent
-    q = state.get("question") or ""
-    payload = dict(state.get("payload") or {})
-    cases = payload.get("cases") or []
-    error_codes = payload.get("error_codes") or []
-    try:
-        verified, report = verify_agent.verify(
-            q, cases,
-            device_type=state.get("device_type"),
-            error_codes=error_codes,
-        )
-        payload["cases"] = verified
-        payload["verify_report"] = report
-    except Exception as e:
-        logger.error(f"[QaGraph] 验证 Agent 执行失败，使用原始候选: {e}")
-    return {"payload": payload}
-
-
 _fault_graph = StateGraph(QaState)
 _fault_graph.add_node("compound_check", compound_check_node)
 _fault_graph.add_node("retrieve", fault_retrieve_node)
 _fault_graph.add_node("filter", fault_filter_node)
-_fault_graph.add_node("verify", fault_verify_node)
 _fault_graph.set_entry_point("compound_check")
 _fault_graph.add_edge("compound_check", "retrieve")
 _fault_graph.add_edge("retrieve", "filter")
-_fault_graph.add_edge("filter", "verify")
-_fault_graph.add_edge("verify", END)
+_fault_graph.add_edge("filter", END)
 FAULT_SUBGRAPH = _fault_graph.compile()
 
 

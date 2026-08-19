@@ -53,6 +53,10 @@ _rerank_lock = threading.Lock()
 _embed_load_error = None
 _rerank_load_error = None
 
+# rerank 服务端防御参数：attention 内存随 (批量 × 序列长²) 增长，
+# 全量长文本一次打分实测会申请 3~5GB 直接 OOM（500），分块+限长封住峰值
+_RERANK_BATCH = 8          # 单次前向的 (query, doc) 对数
+
 
 def _resolve_model_path(candidates: List[str], hf_name: str) -> str:
     """本地路径优先，无则返回 HF 模型名（走 hf-mirror 下载）"""
@@ -126,6 +130,9 @@ def _load_reranker():
             import torch
             from transformers import AutoModelForCausalLM, AutoTokenizer
             _reranker_tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+            # 左 padding：批内取 logits[:, -1] 才恒为各样本的真实末位 token
+            # （右 padding 时末位是 pad，打分会失真）
+            _reranker_tokenizer.padding_side = "left"
             _reranker_model = AutoModelForCausalLM.from_pretrained(
                 model_path, trust_remote_code=True, dtype=torch.float32,
             )
@@ -168,18 +175,24 @@ def _rerank_scores(query: str, documents: List[str]) -> List[float]:
 
     # transformers 手动加载：Qwen3-Reranker 输出 2 类 logits（No/Yes），取末尾 token 的 Yes 分数
     import torch
-    inputs = _reranker_tokenizer(
-        [f"{query}{_reranker_tokenizer.eos_token}{d}" for d in documents],
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=settings.EMBEDDING_MAX_LENGTH * 4,
-    )
-    with torch.no_grad():
-        logits = _reranker_model(**inputs).logits            # [B, L, 2]
-        last_logits = logits[:, -1, :]                        # [B, 2]
-        scores = torch.sigmoid(last_logits[:, 1] - last_logits[:, 0])  # Yes vs No
-    return scores.tolist()
+    max_len = settings.EMBEDDING_MAX_LENGTH * 2      # query+doc 共 1024 token，封住 attention 内存峰值
+    scores: List[float] = []
+    for start in range(0, len(documents), _RERANK_BATCH):
+        chunk = [f"{query}{_reranker_tokenizer.eos_token}{d}"
+                 for d in documents[start: start + _RERANK_BATCH]]
+        inputs = _reranker_tokenizer(
+            chunk,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=max_len,
+        )
+        with torch.no_grad():
+            logits = _reranker_model(**inputs).logits            # [B, L, 2]
+            last_logits = logits[:, -1, :]                        # [B, 2]（左 padding，末位即真实 token）
+            s = torch.sigmoid(last_logits[:, 1] - last_logits[:, 0])  # Yes vs No
+        scores.extend(s.tolist())
+    return scores
 
 
 class EmbeddingRequest(BaseModel):

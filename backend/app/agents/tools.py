@@ -41,6 +41,36 @@ for _term in _DEVICE_TYPE_TERMS:
             if _i + _n <= len(_term):
                 _DEVICE_TYPE_NGRAMS.add(_term[_i:_i + _n])
 
+
+# 知识库实际设备词（DB 动态加载 + 缓存）：静态表不含库里真实设备（如 CNC加工中心/磨床），
+# 导致严格过滤的 require_device 永远匹配不上，第一遍必空——设备词必须与库同步
+_DB_DEVICE_TERMS: set = set()
+_DB_DEVICE_TERMS_LOADED_AT: float = 0.0
+_DB_DEVICE_TERMS_TTL = 300.0
+
+
+def get_device_terms() -> set:
+    """设备词全集 = 静态内置词 + 知识库已发布知识的 device_type（5 分钟缓存）"""
+    global _DB_DEVICE_TERMS, _DB_DEVICE_TERMS_LOADED_AT
+    import time as _time
+    if _DB_DEVICE_TERMS and (_time.time() - _DB_DEVICE_TERMS_LOADED_AT) < _DB_DEVICE_TERMS_TTL:
+        return _DEVICE_TYPE_TERMS | _DB_DEVICE_TERMS
+    try:
+        from app.core.database import SessionLocal
+        from app.models.knowledge import KnowledgeItem
+        db = SessionLocal()
+        try:
+            rows = db.query(KnowledgeItem.device_type).filter(
+                KnowledgeItem.device_type.isnot(None)
+            ).distinct().all()
+            _DB_DEVICE_TERMS = {r[0].strip() for r in rows if r[0] and r[0].strip()}
+            _DB_DEVICE_TERMS_LOADED_AT = _time.time()
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning(f"[Tools] 知识库设备词加载失败，仅用静态表: {e}")
+    return _DEVICE_TYPE_TERMS | _DB_DEVICE_TERMS
+
 # 故障原因关键词（只有症状/异常描述，不含设备名/部件名）
 # 设备名/部件名不是故障原因，不应参与故障匹配评分
 _FAULT_CAUSE_SIGNALS = {

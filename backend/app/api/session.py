@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 from typing import List, Optional
 from loguru import logger
 
-from app.agents.session_agent import session_summarizer
+from app.agents.session_summarizer import session_summarizer
 
 router = APIRouter()
 

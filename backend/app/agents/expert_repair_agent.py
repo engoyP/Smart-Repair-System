@@ -190,7 +190,7 @@ class ExpertRepairAgent:
             if h.get("ai"):
                 msgs.append({"role": "assistant", "content": h["ai"]})
         try:
-            from app.agents.session_agent import session_summarizer
+            from app.agents.session_summarizer import session_summarizer
             summary = session_summarizer.summarize(msgs)
         except Exception as e:
             logger.warning(f"[ExpertRepair] 历史摘要压缩失败，保留原文: {e}")
@@ -363,21 +363,39 @@ class ExpertRepairAgent:
     # ============ 工具 ============
 
     def _search_knowledge(self, query: str) -> List[Dict]:
-        """轻量双路检索（公共编排层）：向量 + BM25 → RRF → 粗筛 → 模型/规则精排 → 验证取 top3"""
+        """管道四路优先 → 阀门判定 → 不足 ReAct 救援，取 top3
+
+        引导轮专用：先走确定性四路管道（retrieve_hybrid + 严格过滤 + 精排 + 置顶）；
+        结果不满足公共阀门（≥3 条且高分≥2 或最高分≥0.7）时触发 ReAct 救援改写检索，保证引导素材充分。
+        """
         try:
-            from app.agents.retrieval_flow import make_tools, retrieve_hybrid, filter_rerank_cases
+            from app.agents.retrieval_flow import (
+                make_tools, retrieve_hybrid, filter_rerank_cases, extract_device_and_fault,
+                evaluate_retrieval_quality,
+            )
             tools = make_tools()
             merged, error_codes, tools = retrieve_hybrid(query, top_k=10)
+            device, kws = extract_device_and_fault(tools, query)
             cases = filter_rerank_cases(
-                tools, merged, query, top_n=5, error_codes=error_codes,
+                tools, merged, query, top_n=5,
+                require_device=device, require_keywords=tuple(kws),
+                error_codes=error_codes,
             )
-            try:
-                from app.agents.verify_agent import verify_agent
-                verified, _report = verify_agent.verify(query, cases)
-                return verified[:3]
-            except Exception as e:
-                logger.warning(f"[ExpertRepair] 验证降级，返回原检索结果: {e}")
+            # 管道充分 → 直接返回
+            if evaluate_retrieval_quality(cases)["sufficient"]:
                 return cases[:3]
+
+            # 管道不足 → ReAct 救援（首轮强制双路），再严格过滤收口
+            from app.agents.retrieval_agent import RetrievalAssistantAgent
+            agent = RetrievalAssistantAgent(tools=tools)
+            result = agent.search(query=query, max_results=10, require_hybrid=True)
+            device, kws = extract_device_and_fault(tools, query)
+            cases = filter_rerank_cases(
+                tools, result.results, query, top_n=5,
+                require_device=device, require_keywords=tuple(kws),
+                error_codes=error_codes,
+            )
+            return cases[:3]
         except Exception as e:
             logger.error(f"[ExpertRepair] 检索失败: {e}")
             return []
