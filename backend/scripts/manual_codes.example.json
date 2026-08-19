@@ -1,0 +1,32 @@
+[
+  {
+    "manual_name": "FANUC Series 0i 数控系统维修手册",
+    "device_type": "数控机床",
+    "error_code": "SV0436",
+    "title": "伺服放大器过电流报警",
+    "message_text": "SV0436 X AXIS: EXCESS CURRENT IN SERVO",
+    "description": "伺服放大器检测到输出电流超过额定值，伺服电机停止运行，系统显示 SV0436 报警。",
+    "severity": "OH",
+    "effect": "停机",
+    "related_codes": ["SV0401"],
+    "conditions": [
+      {
+        "signal": "上电或启动瞬间报警，伴随电机异响或火花",
+        "cause": "伺服电机动力线绝缘破损导致相间短路",
+        "steps": "a. 用兆欧表测量电机三相绕组对地绝缘（应>100MΩ）；b. 检查动力线外观有无破损"
+      },
+      {
+        "signal": "启动瞬间电流突增报警，电机无法转动",
+        "cause": "电机抱闸未完全打开，启动瞬间电流过大",
+        "steps": "a. 检查抱闸电源（DC24V）及抱闸线圈电阻（正常40±5Ω）；b. 确认抱闸释放时序正确"
+      },
+      {
+        "signal": "重载加工中报警",
+        "cause": "机械负载过大（导轨润滑不良或传动卡死）",
+        "steps": "a. 检查导轨润滑泵油位及油路是否堵塞；b. 断开联轴器手转丝杠，确认机械部分无卡死"
+      }
+    ],
+    "chapter": "6.2 伺服报警（SV）",
+    "page": "P245"
+  }
+]
