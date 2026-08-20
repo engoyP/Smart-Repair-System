@@ -94,6 +94,11 @@ class TicketUnderstandingAgent:
         original_phenomenon = work_order_data.get("fault_phenomenon", "")
         original_root_cause = work_order_data.get("root_cause", "")
         original_solution = work_order_data.get("solution_steps", "")
+        original_error_code = work_order_data.get("device_error_code", "")
+        original_device_type = work_order_data.get("device_type", "")
+        original_log_text = work_order_data.get("log_text", "")
+        original_repair_result = work_order_data.get("repair_result", "")
+        original_work_hours = work_order_data.get("work_hours", "")
 
         if not fault_description:
             return TicketAnalysisResult(
@@ -109,6 +114,11 @@ class TicketUnderstandingAgent:
             fault_phenomenon=original_phenomenon or "（未填写）",
             root_cause=original_root_cause or "（未填写）",
             solution_steps=original_solution or "（未填写）",
+            device_error_code=original_error_code or "（未填写）",
+            device_type=original_device_type or "（未填写）",
+            log_text=original_log_text or "（未填写）",
+            repair_result=original_repair_result or "（未填写）",
+            work_hours=original_work_hours or "（未填写）",
         )
 
         logger.info(
@@ -124,6 +134,11 @@ class TicketUnderstandingAgent:
         fault_phenomenon: str,
         root_cause: str,
         solution_steps: str,
+        device_error_code: str = "",
+        device_type: str = "",
+        log_text: str = "",
+        repair_result: str = "",
+        work_hours: str = "",
     ) -> TicketAnalysisResult:
         """调用 LLM 进行工单分析（带 LangFuse 追踪）"""
 
@@ -144,9 +159,10 @@ class TicketUnderstandingAgent:
 - **severity**: 紧急程度（LOW=轻微/MEDIUM=中等/HIGH=严重/CRITICAL=紧急停机）
 
 ### 3. 校验
-- **completeness_score**: 信息完整度 0-1（故障描述质量 + 各字段填充率）
-- **missing_fields**: 缺失的关键字段列表
+- **completeness_score**: 信息完整度 0-1（基于故障描述质量 + 必填字段填充率）
+- **missing_fields**: 仅统计必填字段中缺失的关键字段列表（故障描述、故障码、设备信息等）
 - **validation_notes**: 校验说明（20-80字）
+- 注意：**根本原因(root_cause)和维修建议(solution_steps)属于补充信息，为选填项**，即使为空也不能计入 missing_fields，也不可因其为空而降低 completeness_score。
 
 ### 4. 置信度
 根据信息完整度、描述清晰度、分类确定性综合给出 0-1 的置信度（作为人工审核的参考）：
@@ -164,22 +180,32 @@ class TicketUnderstandingAgent:
   "fault_category": "机械故障",
   "tags": ["振动", "轴承", "电机", "异响"],
   "severity": "HIGH",
-  "completeness_score": 0.75,
-  "missing_fields": ["root_cause", "solution_steps"],
-  "validation_notes": "故障描述清晰，但根因和方案为空，建议补充",
+  "completeness_score": 0.9,
+  "missing_fields": [],
+  "validation_notes": "故障描述清晰，必填字段完整",
   "confidence": 0.72,
   "reasoning": "分析推理过程（50-150字）",
   "suggested_actions": ["建议测量振动频谱", "检查轴承润滑状态"]
 }"""
 
+        # 动态构建工单信息：只列出有值的字段，避免标准录入出现日志/报警码等无关字段
+        _fields = [
+            ("故障描述", fault_description),
+            ("故障码", fault_code),
+            ("报警码(device_error_code)", device_error_code),
+            ("设备类型(device_type)", device_type),
+            ("日志原文(log_text)", log_text),
+            ("故障现象", fault_phenomenon),
+            ("根本原因", root_cause),
+            ("处理步骤", solution_steps),
+            ("维修结果", repair_result),
+            ("工时", work_hours),
+        ]
+        _lines = "\n".join(f"- {label}：{val}" for label, val in _fields if val and val != "（未填写）")
         user_message = f"""请分析以下工单：
 
 ## 工单信息
-- 故障描述：{fault_description}
-- 故障码：{fault_code}
-- 故障现象：{fault_phenomenon}
-- 根本原因：{root_cause}
-- 解决方案：{solution_steps}
+{_lines}
 
 请执行标准化、分类、校验，返回 JSON。"""
 

@@ -10,7 +10,7 @@
         <el-descriptions :column="2" border>
           <el-descriptions-item label="故障描述" :span="2">{{ form.fault_description || '-' }}</el-descriptions-item>
           <el-descriptions-item label="故障码">{{ displayFaultCodes || '-' }}</el-descriptions-item>
-          <el-descriptions-item label="设备错误码">{{ form.device_error_code || '-' }}</el-descriptions-item>
+          <el-descriptions-item v-if="form.device_error_code" label="设备错误码">{{ form.device_error_code }}</el-descriptions-item>
           <template v-if="form.device_id">
             <el-descriptions-item label="设备">
               <div style="display:flex;align-items:center;gap:8px">
@@ -73,17 +73,24 @@
 
     <!-- 编辑模式 -->
     <template v-if="!isViewMode">
+      <div class="work-order-form-head">
+        <h3 class="work-order-form-title">{{ isNew ? '新增工单' : (form.work_order_no || '编辑工单') }}</h3>
+        <div class="work-order-form-actions">
+          <el-button @click="viewDrafts">查看历史草稿</el-button>
+          <el-button type="primary" @click="router.push('/work-orders')">返回列表</el-button>
+        </div>
+      </div>
       <div class="form-body">
-        <!-- 录入模式切换：标准录入 / 错误码录入 -->
+        <!-- 录入模式切换：标准录入 / 日志录入 -->
         <div class="mode-switch-bar">
           <span class="mode-switch-label">录入方式</span>
           <div class="mode-switch">
             <span class="mode-tab" :class="{ active: entryMode === 'standard' }" @click="switchEntryMode('standard')">标准录入</span>
-            <span class="mode-tab" :class="{ active: entryMode === 'error_code' }" @click="switchEntryMode('error_code')">错误码录入</span>
+            <span class="mode-tab" :class="{ active: entryMode === 'error_code' }" @click="switchEntryMode('error_code')">日志录入</span>
           </div>
         </div>
 
-        <!-- 错误码录入模式：粘贴日志原文 → 抠码 + 手册情形勾选 + 工单案例预填 -->
+        <!-- 日志录入模式：粘贴日志原文 → 抠码 + 手册情形勾选 + 工单案例预填 -->
         <template v-if="entryMode === 'error_code'">
           <el-card shadow="never" class="section-card error-code-card">
             <template #header>
@@ -205,7 +212,7 @@
               <el-descriptions-item label="缺失字段">
                 <div v-if="(analysisResult.missing_fields || []).length" class="missing-fields">
                   <template v-for="f in analysisResult.missing_fields" :key="f">
-                  <el-tag type="danger" size="small" style="margin-right:4px">{{ f }}</el-tag>
+                  <el-tag type="danger" size="small" style="margin-right:4px">{{ fieldLabelMap[f] || f }}</el-tag>
                 </template>
                 </div>
                 <span v-if="!(analysisResult.missing_fields || []).length" style="color:#52c41a">无</span>
@@ -297,7 +304,6 @@
             <div class="form-section">
               <div class="section-header">
                 诊断与维修
-                <el-button size="small" type="warning" style="float:right" @click="askAI('diagnosis')">AI 诊断建议</el-button>
               </div>
               <el-form-item label="处理步骤" required>
                 <div class="solution-area">
@@ -340,7 +346,30 @@
                   <el-input v-model="form.follow_up_plan" type="textarea" :rows="2" placeholder="请说明未能修复的原因" />
                 </el-form-item>
               </template>
-              <el-form-item label="故障码" required>
+              <!-- 故障码：日志录入模式下复用顶部解析出的识别报警码，与日志区联动；标准录入使用故障码下拉 -->
+              <el-form-item v-if="entryMode === 'error_code'" label="故障码（识别报警码）" required>
+                <div class="ec-codes-row">
+                  <span class="ec-codes-label">识别报警码</span>
+                  <el-tag
+                    v-for="c in extractedCodes"
+                    :key="c"
+                    closable
+                    size="small"
+                    class="ec-code-tag"
+                    @close="removeExtractedCode(c)"
+                  >{{ c }}</el-tag>
+                  <el-input
+                    v-model="manualCodeInput"
+                    size="small"
+                    class="ec-code-input"
+                    placeholder="手动补码后回车"
+                    @keydown.enter="addManualCode"
+                  />
+                  <span v-if="!extractedCodes.length" class="ec-code-empty">未识别到报警码可手动补充</span>
+                </div>
+                <div class="cascader-hint">日志解析后自动填入报警码，可手动增删；切换录入模式不会丢失解析结果</div>
+              </el-form-item>
+              <el-form-item v-else label="故障码" required>
                 <div class="fault-code-row">
                   <el-select
                     v-model="form.fault_code"
@@ -384,27 +413,6 @@
                     </span>
                   </template>
                   <div class="supplement-body">
-                    <el-form-item label="故障现象">
-                      <el-cascader
-                        v-model="faultPhenomenonCascader"
-                        :options="faultPhenomenaOptions"
-                        :props="{ value: 'value', label: 'label', children: 'children', checkStrictly: false }"
-                        placeholder="选择故障大类 → 具体现象（也可跳过，直接在下方手动输入）"
-                        style="width:100%"
-                        clearable
-                        filterable
-                        @change="onFaultPhenomenonChange"
-                      />
-                      <div class="cascader-hint">如故障类型不在列表中，可直接在下方文本框自由描述</div>
-                    </el-form-item>
-                    <el-form-item :label="faultPhenomenonCascader.length ? '补充描述' : '故障现象描述'">
-                      <el-input
-                        v-model="form.fault_phenomenon"
-                        type="textarea"
-                        :rows="3"
-                        :placeholder="faultPhenomenonCascader.length ? '选填：对故障现象的补充说明' : '请详细描述故障现象，如：电机启动后出现周期性金属摩擦异响，振动值超标，外壳温度偏高等'"
-                      />
-                    </el-form-item>
                     <el-form-item label="根本原因">
                       <el-cascader
                         v-model="rootCauseCascader"
@@ -425,13 +433,6 @@
                         :rows="3"
                         :placeholder="rootCauseCascader.length ? '选填：根本原因的补充说明' : '请描述根本原因，如：电机轴承磨损导致径向间隙增大，长期缺油运行加速老化'"
                       />
-                    </el-form-item>
-                    <el-form-item label="设备错误码">
-                      <el-input
-                        v-model="form.device_error_code"
-                        placeholder="设备运行日志/屏幕报警的错误码，如 SV0436、6401（多个用逗号分隔）"
-                      />
-                      <div class="cascader-hint">仅带错误码的机电设备填写，提交后自动沉淀到知识库，后续提问该错误码可被检索</div>
                     </el-form-item>
                     <el-form-item label="现场附件">
                       <el-upload
@@ -546,7 +547,7 @@
     </template>
 
     <!-- AI 问答弹窗 -->
-    <el-dialog v-model="aiDialog.visible" title="AI 助手" width="700px" :close-on-click-modal="false">
+    <el-dialog v-model="aiDialog.visible" title="AI 助手" width="960px" :close-on-click-modal="false" class="ai-dialog">
       <div class="ai-dialog-body">
         <div class="ai-dialog-msgs" ref="aiMsgRef">
           <div v-for="(m, i) in aiDialog.messages" :key="i" class="ai-msg-row" :class="m.role">
@@ -651,7 +652,7 @@
 </template>
 
 <script setup>
-import { ref, computed, reactive, onMounted, nextTick } from 'vue'
+import { ref, computed, reactive, onMounted, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
@@ -662,6 +663,12 @@ const route = useRoute()
 const router = useRouter()
 const isNew = computed(() => !route.params.id || route.path.endsWith('/new'))
 const isViewMode = computed(() => !isNew.value && !route.query.edit)
+
+// 查看历史草稿：前往维修报表并预选「草稿」筛选（联动 WorkOrders.vue 的 workorders_filter 恢复逻辑）
+const viewDrafts = () => {
+  sessionStorage.setItem('workorders_filter', JSON.stringify({ status: 'DRAFT' }))
+  router.push('/work-orders')
+}
 
 const DEFAULT_DEVICE_TYPES = [
   { label: '注塑机', value: '注塑机' },
@@ -724,7 +731,7 @@ const analyzing = ref(false)
 const submitting = ref(false)
 const saving = ref(false)
 const analysisResult = ref(null)
-const entryMode = ref('standard')          // standard 标准录入 | error_code 错误码录入
+const entryMode = ref('standard')          // standard 标准录入 | error_code 日志录入
 const ecQuery = ref('')                    // 日志原文输入
 const ecSearching = ref(false)
 const ecResults = ref(null)                // { manual_items, case_items, error_codes }
@@ -732,10 +739,14 @@ const ecError = ref('')
 const extractedCodes = ref([])             // 抠出的报警码 tag 组（写入 device_error_code）
 const manualCodeInput = ref('')            // 手动补码输入
 const supplementOpen = ref([])             // 补充信息折叠区展开状态
-// 错误码录入模式：填了设备 + 故障描述即可提交；标准模式仍需 AI 校验
-const canSubmit = computed(() => entryMode.value === 'error_code'
-  ? !!(form.device_id && form.fault_description)
-  : !!analysisResult.value)
+// 根本原因是否已填
+const hasRootCause = () => !!(rootCauseCascader.value.length || (form.root_cause && form.root_cause.trim()))
+// 补充信息是否启用：折叠区被展开过，视为需要填写补充信息
+const supplementActive = () => supplementOpen.value.includes('supplement')
+// 提交允许条件：故障描述不为空即可提交（标准/日志录入均如此）
+const canSubmit = computed(() => {
+  return !!(form.fault_description)
+})
 
 const sevTagType = (s) => ({ EX: 'danger', OH: 'warning', INFO: 'info' }[s] || 'info')
 const sevLabel = (s) => ({ EX: 'EX 急停', OH: 'OH 停机', INFO: 'INFO 提示' }[s] || s)
@@ -743,9 +754,7 @@ const sevLabel = (s) => ({ EX: 'EX 急停', OH: 'OH 停机', INFO: 'INFO 提示'
 // 补充信息已填项数（折叠区标题徽标）
 const supplementFilledCount = computed(() => {
   let n = 0
-  if (faultPhenomenonCascader.value.length || form.fault_phenomenon) n++
   if (rootCauseCascader.value.length || form.root_cause) n++
-  if (form.device_error_code) n++
   if (attachments.value.length) n++
   if (usedParts.value.length) n++
   return n
@@ -795,20 +804,25 @@ const switchEntryMode = (mode) => {
   if (entryMode.value === mode) return
   const confirmSwitch = () => {
     resetFormFields()
-    ecResults.value = null
-    ecQuery.value = ''
-    extractedCodes.value = []
-    manualCodeInput.value = ''
+    // 日志解析结果暂存：不清空 ecResults/ecQuery/extractedCodes，切换回来仍可见
     entryMode.value = mode
   }
   if (isFormDirty()) {
-    ElMessageBox.confirm('切换录入模式将清空当前已填写的内容，是否继续？', '切换确认', {
+    ElMessageBox.confirm('切换录入模式将清空当前已填写的内容（日志解析结果会保留），是否继续？', '切换确认', {
       confirmButtonText: '继续', cancelButtonText: '取消', type: 'warning',
     }).then(confirmSwitch).catch(() => {})
   } else {
     confirmSwitch()
   }
 }
+
+// 清洗日志：去掉时间戳/日期等无关信息，保留故障/报警描述供自动回填基本信息
+const cleanLogText = (text) => (text || '')
+  .replace(/\d{4}[-/.].\d{1,2}[-/.].\d{1,2}[ T]\d{1,2}:\d{2}(:\d{2})?(\.\d+)?/g, ' ')
+  .replace(/\d{4}[-/.].\d{1,2}[-/.].\d{1,2}/g, ' ')
+  .replace(/\b\d{1,2}:\d{2}(:\d{2})?(\.\d+)?\b/g, ' ')
+  .replace(/\s+/g, ' ')
+  .trim()
 
 // 日志原文检索：抠码 + 手册情形匹配 + 工单案例
 const ecSearch = async () => {
@@ -820,26 +834,52 @@ const ecSearch = async () => {
   ecSearching.value = true
   ecError.value = ''
   try {
-    const res = await request.post('/search/manual-lookup', { query: q, top_k: 5 })
+    const lookupData = await request.post('/search/manual-lookup', { query: q, top_k: 5 }, { timeout: 60000 });
     // 情形勾选初始化：命中情形（signal 带 [命中] 标记）默认勾选
-    (res.manual_items || []).forEach(m => {
+    (lookupData.manual_items || []).forEach(m => {
       m._selected = (m.conditions || [])
         .map((c, i) => (c.signal || '').includes('[命中]') ? i : -1)
         .filter(i => i >= 0)
     })
-    ecResults.value = res
-    if (res.error_codes?.length) {
-      extractedCodes.value = res.error_codes
-      form.device_error_code = res.error_codes.join(',')
+    ecResults.value = lookupData
+    // 自动回填基本信息：
+    //  1) 故障描述：优先取手册命中的故障名称（更精炼），否则用清洗无关时间戳/日期后的日志原文
+    //  2) 设备类型：优先取手册/案例命中的 device_type
+    //  3) 报警码：回填到 extractedCodes / device_error_code
+    if (!form.fault_description) {
+      const manualTitle = lookupData.manual_items?.[0]?.title?.trim()
+      const cleaned = cleanLogText(q)
+      form.fault_description = (manualTitle || cleaned || '')
+    }
+    const devType = (lookupData.manual_items?.[0]?.device_type) || (lookupData.case_items?.[0]?.device_type)
+    if (devType && !form.device_id) form.device_type = devType
+    if (lookupData.error_codes?.length) {
+      extractedCodes.value = lookupData.error_codes
+      form.device_error_code = lookupData.error_codes.join(',')
+      // 同步到 fault_code，避免提交时故障码为空仍需手动重新输入
+      const inCodes = Array.isArray(form.fault_code) ? form.fault_code : []
+      for (const c of lookupData.error_codes) {
+        if (!inCodes.includes(c)) inCodes.push(c)
+      }
+      form.fault_code = inCodes
     }
   } catch (e) {
-    ecError.value = '检索失败，请稍后重试'
+    ecError.value = '检索失败：' + ((e.response?.data?.detail) || (e && e.stack) || e.message || '请稍后重试')
   } finally {
     ecSearching.value = false
   }
 }
 
-const syncExtractedCodes = () => { form.device_error_code = extractedCodes.value.join(',') }
+const syncExtractedCodes = () => {
+  const codes = extractedCodes.value
+  form.device_error_code = codes.join(',')
+  // 同步到 fault_code，保证日志录入自动填入后提交无缺失
+  const inCodes = (Array.isArray(form.fault_code) ? form.fault_code : []).filter(c => codes.includes(c))
+  for (const c of codes) { if (!inCodes.includes(c)) inCodes.push(c) }
+  form.fault_code = inCodes
+}
+// 监听 extractedCodes 变化，自动同步到 form.device_error_code（确保故障码联动）
+watch(extractedCodes, () => { syncExtractedCodes() }, { deep: true })
 const removeExtractedCode = (c) => { extractedCodes.value = extractedCodes.value.filter(x => x !== c); syncExtractedCodes() }
 const addManualCode = () => {
   const c = (manualCodeInput.value || '').trim().toUpperCase()
@@ -869,12 +909,10 @@ const applyManualItem = (m) => {
   if (selected.length) {
     form.fault_description = `${m.title}：${selected[0].cause || m.description || ''}`
     if (m.message_text && !form.fault_phenomenon) form.fault_phenomenon = `日志原文：${m.message_text}`
-    form.root_cause = selected.map((c, i) => `${i + 1}）${c.cause}`).filter(Boolean).join('\n')
     form.solution_steps = selected.map(c => c.steps).filter(Boolean).join('\n')
   } else {
     form.fault_description = m.title || m.description || form.fault_description
     if (m.description && !form.fault_phenomenon) form.fault_phenomenon = m.description
-    if (m.causes) form.root_cause = m.causes
     if (m.solutions) form.solution_steps = m.solutions
   }
   ElMessage.success(`已选用手册方案：${m.error_code} ${m.title}`)
@@ -1154,9 +1192,6 @@ const applyAIFields = () => {
   if (a.standardized_fault_phenomenon && !form.fault_phenomenon_type) {
     form.fault_phenomenon_type = a.standardized_fault_phenomenon
   }
-  if (a.standardized_root_cause && !form.root_cause) {
-    form.root_cause = a.standardized_root_cause
-  }
   if (a.standardized_solution_steps && !form.solution_steps) {
     form.solution_steps = a.standardized_solution_steps
   }
@@ -1237,7 +1272,7 @@ const disabledDate = (time) => time.getTime() > Date.now()
 const saveForm = async () => {
   try {
     const validFields = [
-      'device_id','fault_code','fault_description','fault_phenomenon',
+      'device_id','device_type','fault_code','fault_description','fault_phenomenon',
       'fault_category','fault_phenomenon_type',
       'root_cause','root_cause_category','root_cause_type',
       'solution_steps','solution_ref_knowledge_id',
@@ -1308,6 +1343,18 @@ const handleArchiveComplete = async () => {
   finally { archiving.value = false }
 }
 
+// AI 校验返回的英文字段名 -> 中文展示
+const fieldLabelMap = {
+  fault_description: '故障描述',
+  fault_code: '故障码',
+  fault_phenomenon: '故障现象',
+  root_cause: '根本原因',
+  solution_steps: '处理步骤',
+  repair_result: '维修结果',
+  device_id: '关联设备',
+  work_hours: '工时',
+}
+
 const handleAnalyze = async () => {
   if (!form.fault_description) {
     ElMessage.warning('请填写故障描述')
@@ -1322,7 +1369,7 @@ const handleAnalyze = async () => {
       analyzing.value = false
       return
     }
-    const res = await request.post(`/work-orders/${targetId}/analyze`)
+    const res = await request.post(`/work-orders/${targetId}/analyze`, null, { timeout: 60000 })
     analysisResult.value = res
     ElMessage.success('AI 校验完成')
   } catch { ElMessage.error('AI 校验失败') }
@@ -1331,6 +1378,10 @@ const handleAnalyze = async () => {
 
 const handleSubmit = async () => {
   if (!canSubmit.value) return
+  // 补充信息选填：根因未填时仅文字提醒，不阻塞提交
+  if (supplementActive() && !hasRootCause()) {
+    ElMessage.info('提醒：补充信息中根本原因尚未填写，建议补充后再提交')
+  }
   try {
     await ElMessageBox.confirm(
       '确认提交该工单？提交后系统将自动提取知识并上传到公司知识库。',
@@ -1349,7 +1400,11 @@ const handleSubmit = async () => {
       ElMessage.info('工单已提交完成（检测到相似知识，未重复收录到知识库）')
     }
     router.push('/work-orders')
-  } catch { ElMessage.error('提交失败') }
+  } catch (e) {
+    const msg = (e && e.response && e.response.data && (e.response.data.detail || e.response.data.message))
+      || (e && e.message) || '未知错误'
+    ElMessage.error('提交失败：' + msg)
+  }
   finally { submitting.value = false }
 }
 
@@ -1405,6 +1460,16 @@ const faultCodeDialogClose = () => {
   }, 200)
 }
 
+// 保留 AI 弹窗内最近 3 次分析的对话历史（每次分析 = 1 条 user + 1 条 assistant）
+const trimAiHistory = () => {
+  const userIdx = []
+  aiDialog.messages.forEach((m, i) => { if (m.role === 'user') userIdx.push(i) })
+  if (userIdx.length > 3) {
+    const keepFrom = userIdx[userIdx.length - 3]
+    aiDialog.messages.splice(0, keepFrom)
+  }
+}
+
 const askAI = async (type) => {
   if (form.fault_description) {
     try { await saveForm() } catch { /* ignore */ }
@@ -1434,21 +1499,23 @@ const askAI = async (type) => {
     context += `\n请帮我分析故障分类、可能原因，并给出诊断建议（包括可能的故障码）。`
   }
 
-  aiDialog.messages = [{ role: 'user', content: context }]
-  aiDialog.input = ''
+  // 标准录入 & 日志录入统一：把已填好的故障信息预填到输入框，弹窗打开但不自动发送，
+  // 等待用户修改后点击「发送」；历史保留最近 3 次已发送的分析
+  aiDialog.input = context
   aiDialog.visible = true
-  sendAIMessage()
 }
 
 const sendAIMessage = async () => {
   const text = aiDialog.input.trim()
-  if (!text && aiDialog.messages.length === 1) { /* auto-send */ }
-  else if (!text) return
-
+  const lastMsg = aiDialog.messages[aiDialog.messages.length - 1]
+  const autoSend = !text && lastMsg && lastMsg.role === 'user'
   if (text) {
     aiDialog.messages.push({ role: 'user', content: text })
     aiDialog.input = ''
+  } else if (!autoSend) {
+    return
   }
+  trimAiHistory()
 
   const question = aiDialog.messages[aiDialog.messages.length - 1].content
   const aiMsg = { role: 'assistant', content: '' }
@@ -1458,9 +1525,12 @@ const sendAIMessage = async () => {
   try {
     const response = await fetch('/api/v1/search/answer/stream', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': localStorage.getItem('auth_token') ? `Bearer ${localStorage.getItem('auth_token')}` : ''
+      },
       body: JSON.stringify({ question, top_k: 5 }),
-    })
+    });
 
     if (!response.ok) {
       aiMsg.content = '请求失败，请稍后重试。'
@@ -1558,7 +1628,8 @@ onMounted(async () => {
         rootCauseCascader.value = res.root_cause_type.split(' > ')
       }
 
-      analysisResult.value = res.analysis_result || null
+      // 不自动回显历史 AI 校验结果：刚进入工单时不显示校验卡片，需手动点「AI 校验」重新分析
+      analysisResult.value = null
 
       if (res.analysis_result?.device_type && !res.device_type) {
         form.device_type = res.analysis_result.device_type
@@ -1573,6 +1644,16 @@ onMounted(async () => {
     } catch { ElMessage.error('加载工单失败') }
   }
 })
+
+// [debug] 通过 ?debug=日志原文 自动触发错误码检索（仅带 debug 参数时生效），用于运行时排障
+{
+  const __q = new URLSearchParams(location.search).get('debug')
+  if (__q) {
+    entryMode.value = 'error_code'
+    ecQuery.value = __q
+    ecSearch()
+  }
+}
 </script>
 
 <style scoped>
@@ -1617,7 +1698,7 @@ onMounted(async () => {
 .attach-thumb { width: 80px; height: 80px; object-fit: cover; border-radius: 4px; border: 1px solid #E5E6EB; }
 .attach-name { font-size: 11px; color: #86909C; max-width: 80px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ai-dialog-body { display: flex; flex-direction: column; gap: 12px; }
-.ai-dialog-msgs { max-height: 400px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding: 8px; }
+.ai-dialog-msgs { max-height: 560px; min-height: 320px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding: 8px; }
 .ai-msg-row { max-width: 85%; }
 .ai-msg-row.user { align-self: flex-end; }
 .ai-msg-row.assistant { align-self: flex-start; }
@@ -1626,6 +1707,7 @@ onMounted(async () => {
 .ai-msg-row.assistant .ai-msg-bubble { background: #F2F3F5; color: #1D2129; }
 .ai-msg-bubble.thinking { color: #C9CDD4; font-style: italic; }
 .ai-dialog-input { border-top: 1px solid #E5E6EB; padding-top: 12px; }
+.ai-dialog .ai-dialog-input .el-textarea__inner { min-height: 80px !important; font-size: 14px; }
 .knowledge-dialog { display: flex; flex-direction: column; gap: 12px; }
 .kd-search { display: flex; gap: 8px; }
 .kd-results { max-height: 420px; overflow-y: auto; }
@@ -1723,4 +1805,8 @@ onMounted(async () => {
 .supplement-collapse :deep(.el-collapse-item__content) { padding: 14px 4px 0; }
 .supplement-badge { margin-left: 8px; }
 .supplement-body { padding-left: 4px; }
+
+.work-order-form-head { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:20px; }
+.work-order-form-title { font-size:20px; font-weight:600; color:var(--color-text-primary); margin:0; }
+.work-order-form-actions { display:flex; gap:10px; flex-shrink:0; }
 </style>

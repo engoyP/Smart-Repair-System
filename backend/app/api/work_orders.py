@@ -323,6 +323,11 @@ def analyze_work_order(work_order_id: int, db: Session = Depends(get_db)):
         "fault_phenomenon": work_order.fault_phenomenon,
         "root_cause": work_order.root_cause,
         "solution_steps": work_order.solution_steps,
+        "device_error_code": work_order.device_error_code,
+        "device_type": getattr(work_order, "device_type", None),
+        "log_text": work_order.log_text,
+        "repair_result": work_order.repair_result,
+        "work_hours": work_order.work_hours,
     }
     analysis = ticket_agent.analyze(wo_data)
 
@@ -389,6 +394,11 @@ def complete_work_order(work_order_id: int, db: Session = Depends(get_db)):
         "fault_phenomenon": work_order.fault_phenomenon,
         "root_cause": work_order.root_cause,
         "solution_steps": work_order.solution_steps,
+        "device_error_code": work_order.device_error_code,
+        "device_type": getattr(work_order, "device_type", None),
+        "log_text": work_order.log_text,
+        "repair_result": work_order.repair_result,
+        "work_hours": work_order.work_hours,
     }
     try:
         analysis = ticket_agent.analyze(wo_data)
@@ -848,6 +858,11 @@ def complete_work_order_internal(work_order_id: int, db: Session):
         "fault_phenomenon": work_order.fault_phenomenon,
         "root_cause": work_order.root_cause,
         "solution_steps": work_order.solution_steps,
+        "device_error_code": work_order.device_error_code,
+        "device_type": getattr(work_order, "device_type", None),
+        "log_text": work_order.log_text,
+        "repair_result": work_order.repair_result,
+        "work_hours": work_order.work_hours,
     }
     try:
         analysis = ticket_agent.analyze(wo_data)
